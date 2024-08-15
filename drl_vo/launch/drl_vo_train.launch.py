@@ -17,4 +17,51 @@ from ament_index_python.packages import get_package_share_directory
 import os
 
 def generate_launch_description():
+    # Launch Arguments
+    model_file = LaunchConfiguration('model_file') # Pretrained model file for DRL-VO training
+    log_dir = LaunchConfiguration('log_dir') # Directory to save training logs and results
+
+    # Path to other launch files
+    velocity_smoother_launch_file = os.path.join(
+        get_package_share_directory('turtlebot_teleop'),
+        'launch', 'includes', 'velocity_smoother.launch.py'    # Velocity smoother for teleoperation
+    )
     
+    return LaunchDescription([
+        # Declare Launch Arguments
+        DeclareLaunchArgument('model_file', default_value=os.path.join(
+            get_package_share_directory('drl_vo_nav'),
+            'src', 'model', 'drl_pre_train.zip')), # Default pretrained model
+
+        DeclareLaunchArgument('log_dir', default_value=os.path.join(
+            get_package_share_directory('drl_vo_nav'),
+            'src', 'runs')), # Default log directory
+
+        # Include velocity smoother launch file
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(velocity_smoother_launch_file)
+        ),
+
+        # DRL-VO Training Node
+        Node(
+            package='drl_vo_nav',
+            executable='drl_vo_train.py',
+            name='drl_vo_cmd',
+            output='screen',
+            parameters=[
+                {'model_file': model_file},
+                {'log_dir': log_dir}
+            ],
+        ),
+
+        # Mixed Command Velocity Node
+        Node(
+            package='drl_vo_nav',
+            executable='cmd_vel_pub.py',
+            name='mix_cmd_vel',
+            output='screen',
+            remappings=[
+                ('cmd_vel', 'teleop_velocity_smoother/raw_cmd_vel')
+            ]
+        ),
+    ])
