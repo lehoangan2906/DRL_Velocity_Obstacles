@@ -1,11 +1,21 @@
 """ 
+(Call to velocity_smoother.launch.py, cmd_vel_pub.py and drl_vo_train.py)
+
 This file sets up the training environment for the DRL-VO model. It includes the 
 following components:
  - The model file and log directory are specified as launch arguments.
  - The `turtlebot_teleop' pacakage is included for velocity smoothing during teleoperation.
  - The `drl_vo_cmd` node is the main training node, which tuns the training scripts.
  - The `mix_cmd_vel` node handles publishing mixed velocity commands to the robot.
-"""
+
+Future modifications:
+    - If you plan to modify the robot platform or the simulation environment, focus on the
+    `model_file`, and `log_dir`, and any included files or nodes that are specific to the current 
+    robot configuration.
+    - If you transition from fixed goals to following a dynamic human, you may need to adjust
+    the `drl_vo_train.py` script and how it interacts with the `mix_cmd_vel` node or any other nodes
+    responsible for interpreting dynamic goals.
+ """
 
 
 from launch import LaunchDescription
