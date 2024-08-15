@@ -141,5 +141,6 @@ def main(args=None):
     drl_vo_train.destroy_node()   # Destroy the node explicitly (optional)
     rclpy.shutdown()        # Shutdown the node
 
+
 if __name__ == '__main__':
     main()  # Run the main function
