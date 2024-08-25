@@ -1,26 +1,26 @@
 #!/usr/bin/python3
-
-# This script is to train the DRL-VO policy using the PPO algorithm with ROS2 integration.
+# This script is used to train the DRL-VO policy using the PPO algorithm.
 
 import rclpy
 import os
 import numpy as np
 import gym
-import turtlebot_gym  # Ensure this is correctly defined in your environment
+import turtlebot_gym    # Custom gym environment
 from rclpy.node import Node
 from sensor_msgs.msg import Point  # Import Point for dynamic goal position
+from stable_baselines3 import PPO
+from stable_baselines3.common.vec_env import DummyVecEnv
 from stable_baselines3.common.env_checker import check_env
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3 import PPO
 from stable_baselines3.common.results_plotter import load_results, ts2xy
-from stable_baselines3.common.vec_env import DummyVecEnv
 from stable_baselines3.common.callbacks import BaseCallback
-from custom_cnn_full import CustomCNN  # Custom CNN model
+from custom_cnn_full import CustomCNN  # Import custom CNN model
 
 class SaveOnBestTrainingRewardCallback(BaseCallback):
     """
     Callback for saving a model based on the training reward.
-    Checks every `check_freq` steps and saves the model if the mean reward improves.
+    The check is done every ``check_freq`` steps.
+    
     :param check_freq: (int) Frequency to check the reward.
     :param log_dir: (str) Path to the folder where the model will be saved.
     :param verbose: (int) Verbosity level.
@@ -45,19 +45,18 @@ class SaveOnBestTrainingRewardCallback(BaseCallback):
                 # Mean training reward over the last 100 episodes
                 mean_reward = np.mean(y[-100:])
                 if self.verbose > 0:
-                    print("Num timesteps: {}".format(self.num_timesteps))
-                    print("Best mean reward: {:.2f} - Last mean reward per episode: {:.2f}".format(self.best_mean_reward, mean_reward))
+                    print(f"Num timesteps: {self.num_timesteps}")
+                    print(f"Best mean reward: {self.best_mean_reward:.2f} - Last mean reward per episode: {mean_reward:.2f}")
 
                 # New best model, save it
                 if mean_reward > self.best_mean_reward:
                     self.best_mean_reward = mean_reward
                     if self.verbose > 0:
-                        print("Saving new best model to {}".format(self.save_path))
+                        print(f"Saving new best model to {self.save_path}")
                     self.model.save(self.save_path)
-
-        # Save model every 100000 timesteps:
+        
+        # Save model every 20000 timesteps
         if self.n_calls % 20000 == 0:
-            # Retrieve training reward
             path = self.save_path + '_model' + str(self.n_calls)
             self.model.save(path)
 
@@ -68,6 +67,9 @@ class DRLVOTrain(Node):
     ROS2 Node class for training the DRL-VO policy using the PPO algorithm.
     This class sets up the environment, loads the pre-trained model if available,
     and continues training it while logging progress and saving the best model.
+
+    :param log_dir: (str) Directory to save logs and model checkpoints.
+    :param model_file: (str) Path to the pre-trained model file to continue training from.
     """
     def __init__(self):
         super().__init__('drl_vo_train')
@@ -87,7 +89,7 @@ class DRLVOTrain(Node):
         os.makedirs(log_dir, exist_ok=True)
 
         # Create and wrap the environment
-        env = gym.make('drl-nav-v0', dynamic_goal=self.current_goal)  # Pass the dynamic goal to the environment
+        env = gym.make('drl-nav-v0', dynamic_goal=self.current_goal) # Initialize the custom gym environment with dynamic goal
         env = Monitor(env, log_dir)  # Monitor the environment to log training data
 
         # Policy parameters for PPO
@@ -97,17 +99,18 @@ class DRLVOTrain(Node):
             net_arch=[dict(pi=[256], vf=[128])]  # Architecture for the policy (actor or pi) and value function (critic or vf)
         )
 
-        # Load the pre-trained model and continue training
-        kwargs = {
-            'tensorboard_log': log_dir,  # Directory for TensorBoard logs
-            'verbose': 2,  # Verbosity level
-            'n_epochs': 10,  # Number of epochs per update
-            'n_steps': 512,  # Number of steps per environment per update
-            'batch_size': 128,  # Minibatch size for each gradient update
-            'learning_rate': 5e-5  # Learning rate for the optimizer
-        }
-        
-        self.model = PPO.load(model_file, env=env, **kwargs)  # Load the pre-trained model with specified parameters
+        # Raw training (uncomment if needed)
+        self.model = PPO("CnnPolicy", env, policy_kwargs=policy_kwargs, learning_rate=1e-3, verbose=2, tensorboard_log=log_dir, n_steps=512, n_epochs=10, batch_size=128)
+
+        # Continue training with pre-trained model
+        # kwargs = {'tensorboard_log': log_dir,  # Directory for TensorBoard logs
+        #          'verbose': 2,  # Verbosity level
+        #          'n_epochs': 10,  # Number of epochs per update
+        #          'n_steps': 512,  # Number of steps per environment per update
+        #          'batch_size': 128,  # Minibatch size for each gradient update
+        #          'learning_rate': 5e-5}  # Learning rate for the optimizer
+
+        # self.model = PPO.load(model_file, env=env, **kwargs)  # Load the pre-trained model with specified parameters
 
         # Create the callback to save the best model
         callback = SaveOnBestTrainingRewardCallback(check_freq=5000, log_dir=log_dir)
@@ -132,7 +135,7 @@ class DRLVOTrain(Node):
 def main(args=None):
     """
     Main function to initialize the ROS2 node and start the training process.
-    This function initializes ROS2, creates an instance of the DRLVOTrain node, 
+    This function initializes ROS2, creates an instance of the DRLVOTrain node,
     and keeps it running until training is complete.
     """
     rclpy.init(args=args)  # Initialize the ROS2 communication Node
