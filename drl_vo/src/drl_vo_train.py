@@ -92,7 +92,7 @@ class DRLVOTrain(Node):
         env = gym.make('drl-nav-v0', dynamic_goal=self.current_goal) # Initialize the custom gym environment with dynamic goal
         env = Monitor(env, log_dir)  # Monitor the environment to log training data
 
-        # Policy parameters for PPO
+        # Policy parameters for PPO - for training the model from scratch
         policy_kwargs = dict(
             features_extractor_class=CustomCNN,  # Use a custom CNN for feature extraction
             features_extractor_kwargs=dict(features_dim=256),  # Output dimension from the CNN
@@ -102,14 +102,15 @@ class DRLVOTrain(Node):
         # Raw training (uncomment if needed)
         self.model = PPO("CnnPolicy", env, policy_kwargs=policy_kwargs, learning_rate=1e-3, verbose=2, tensorboard_log=log_dir, n_steps=512, n_epochs=10, batch_size=128)
 
+        # Policy parameters for PPO - for continuing training with pre-trained model
+        kwargs = {'tensorboard_log': log_dir,  # Directory for TensorBoard logs
+                 'verbose': 2,  # Verbosity level
+                 'n_epochs': 10,  # Number of epochs per update
+                 'n_steps': 512,  # Number of steps per environment per update
+                 'batch_size': 128,  # Minibatch size for each gradient update
+                 'learning_rate': 5e-5}  # Learning rate for the optimizer
+        
         # Continue training with pre-trained model
-        # kwargs = {'tensorboard_log': log_dir,  # Directory for TensorBoard logs
-        #          'verbose': 2,  # Verbosity level
-        #          'n_epochs': 10,  # Number of epochs per update
-        #          'n_steps': 512,  # Number of steps per environment per update
-        #          'batch_size': 128,  # Minibatch size for each gradient update
-        #          'learning_rate': 5e-5}  # Learning rate for the optimizer
-
         # self.model = PPO.load(model_file, env=env, **kwargs)  # Load the pre-trained model with specified parameters
 
         # Create the callback to save the best model
