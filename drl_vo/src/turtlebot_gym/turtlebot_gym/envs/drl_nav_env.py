@@ -259,22 +259,30 @@ class DRLNavEnv(Node):
             pass
 
     # callback functions for ROS2
+    # ========================================================================= #
+
     def _map_callback(self, map_msg):
+        # Callback function to get the map
         self.map = map_msg
 
     def _cnn_data_callback(self, cnn_data_msg):
+        # callback function to get the CNN data
         self.cnn_data = cnn_data_msg
 
     def _robot_pose_callback(self, robot_pose_msg):
+        # callback function to get the robot pose
         self.curr_pose = robot_pose_msg.pose
 
     def _robot_vel_callback(self, robot_vel_msg):
+        # callback function to get the robot velocity
         self.curr_vel = robot_vel_msg.twist.twist
 
     def _final_goal_callback(self, final_goal_msg):
+        # callback function to get the final goal
         self.goal_position = final_goal_msg.pose.position
 
     def _goal_status_callback(self, goal_status_msg):
+        # callback function to get the goal status
         if len(goal_status_msg.status_list) > 0:
             last_element = goal_status_msg.status_list[-1]
             if last_element.status == 3:
@@ -285,6 +293,24 @@ class DRLNavEnv(Node):
             self._goal_reached = False
     
     def _ped_callback(self, trackPed_msg):
+        # callback function to get the pedestrian data
         self.mht_peds = trackPed_msg
 
-    
+    # ========================================================================= #
+
+    # Publisher functions to publish data
+    def _pub_initial_model_state(self, x, y, theta):
+        robot_state = ModelState()
+        robot_state.model_name = "mobile_base"
+        robot_state.pose.position.x = x
+        robot_state.pose.position.y = y
+        robot_state.pose.position.z = 0
+        robot_state.pose.orientation.x = 0
+        robot_state.pose.orientation.y = 0
+        robot_state.pose.orientation.z = np.sin(theta/2)
+        robot_state.pose.orientation.w = np.cos(theta/2)
+        robot_state.reference_frame = "world"
+        try:
+            result = self.gazebo_client.call(robot_state)
+        except rclpy.ServiceException:
+            pass
