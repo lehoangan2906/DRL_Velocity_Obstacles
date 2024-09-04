@@ -601,26 +601,32 @@ class DRLNavEnv(Node):
     
     # Translate a given action into velocity commands, then publishing these commands to the robot
     def _take_action(self, action):
-        # Create a Twist message
+        """
+        Converts action values into linear and angular velocity commands and publishes them.
+        
+        Args:
+            action (list): A list where action[0] is the linear velocity control input 
+                        and action[1] is the angular velocity control input.
+        """
         cmd_vel = Twist()
-
-        # Define the desired range for linear velocity
-        vx_min = -0.65  # Minimum linear velocity
-        vx_max = 0.65   # Maximum linear velocity
-
-        # Define the desired range for angular velocity
-        vz_min = -1.85  # Minimum angular velocity
-        vz_max = 1.85   # Maximum angular velocity
-
-        # Scale action[0] (linear velocity) from the range [-1, 1] to [-0.65, 0.65]
+        
+        # Set the new linear velocity range [-0.22, 0.22] m/s
+        vx_min = -0.22
+        vx_max = 0.22
+        
+        # Set the new angular velocity range [-2.84, 2.84] rad/s
+        vz_min = -2.84
+        vz_max = 2.84
+        
+        # Map the action[0] (assumed to be in the range [-1, 1]) to the linear velocity range
         cmd_vel.linear.x = (action[0] + 1) * (vx_max - vx_min) / 2 + vx_min
-
-        # Scale action[1] (angular velocity) from the range [-1, 1] to [-1.85, 1.85]
+        
+        # Map the action[1] (assumed to be in the range [-1, 1]) to the angular velocity range
         cmd_vel.angular.z = (action[1] + 1) * (vz_max - vz_min) / 2 + vz_min
-
+        
         # Publish the velocity command
         self._cmd_vel_pub.publish(cmd_vel)
 
+
     # ========================================================================= #
     # Reward computation
-    
