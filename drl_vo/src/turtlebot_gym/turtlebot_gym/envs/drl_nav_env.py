@@ -630,3 +630,100 @@ class DRLNavEnv(Node):
 
     # ========================================================================= #
     # Reward computation
+
+    def _goal_reached_reward(self, r_arrival, r_waypoint):
+        """
+        Computes the reward based on how close the robot is to the goal.
+        It rewards the robot for reaching the goal or making progress towards it 
+        and penalizes the robot if it fails to reach the goal within the allowed iterations.
+
+        Args:
+            r_arrival (float): Reward for reaching the goal.
+            r_waypoint (float): Reward for making progress towards the goal.
+
+        Returns:
+            float: The computed reward
+        """
+
+        # Calculate the Euclidean distance between the robot's current position and the goal position
+        dist_to_goal = np.linalg.norm(
+            np.array([
+                self.curr_pose.position.x - self.goal_position.x, # X-distance to goal 
+                self.curr_pose.position.y - self.goal_position.y, # Y-distance to goal
+                self.curr_pose.position.z - self.goal_position.z # Z-distance to goal
+            ])
+        )
+
+        # Use modulo operation to track progress every DIST_NUM iterations
+        t_1 = self.num_iterations % self.DIST_NUM
+
+        # Initialize the distance tracking array on the first iteration
+        if self.num_iterations == 0:
+            self.dist_to_goal_reg = np.ones(self.DIST_NUM) * dist_to_goal # Initialize the array with the current distance
+        
+        # Define the maximum number of iterations allowed for reaching the goal
+        max_iteration = 512
+
+        # Case 1: Robot reaches the goal (distance to goal is within the specified radius)
+        if dist_to_goal < self.GOAL_RADIUS:
+            reward = r_arrival # Assign maximum reward for reaching the goal
+
+        # Case 2: Robot fails to reach teh goal within the maximum allowed iterations
+        elif self.num_iterations >= max_iteration:
+            reward = -r_arrival # Penalize the robot for not reaching the goal in time
+
+        # Case 3: Robot is making progress but hasn't reached the goal_yet
+        else:
+            # Reward is proportional to the reduction in distance to the goal since the last check
+            reward = r_waypoint * (self.dist_to_goal_reg[t_1] - dist_to_goal)
+
+        # Update the distance reward for the current iteration (used for future comparisons)
+        self.dist_to_goal_reg[t_1] = dist_to_goal
+
+        # Return the calculated reward (positive for progress or goal reached, negative for failure)
+        return reward
+
+    def _compute_reward(self):
+        """
+        Computes the total reward for the robot's action based on various criteria such as:
+        - Reaching the goal
+        - Avoiding obstacles
+        - Minimizing angular velocity (smooth turning)
+        - Keeping a good heading angle toward the goal
+
+        Returns:
+            float: The toal reward for the current action.
+        """
+
+        # Reward for reaching the goal
+        r_arrival = 20 # Large positive reward for reaching the goal.
+        r_waypoint = 3.2 # Smaller reward for moving closer to the goal.
+
+        # Penalty for colliding with obstacles
+        r_collision = -20 # Large negative penalty for collisions
+        r_scan = -0.2  # Penalty for being too close to obstacles (based on scan data)
+
+        # Rewards related to the robot's angle and smooth turning
+        r_angle = 0.6 # Reward for maintaining the correct heading angle towards the goal
+        r_rotation = -0.1 # Penalty for excessive rotation (fast turns)
+
+        # Thresholds for angular velocity and angle deviation
+        angle_thresh = np.pi / 6 # Angle threshold (30 degrees)
+        w_thresh = 1 # Angular velocity threshold
+
+        # 1. COmpute the reward for reaching or moving toward the goal
+        r_g = self._goal_reached_reward(r_arrival, r_waypoint)
+
+        # 2. Compute the penalty for collisions or being too close to obstacles
+        r_c = self._obstacle_collision_punish(self.cnn_data.scan[:450], r_scan, r_collision)
+
+        # 3. Compute the penalty for high angular velocity (fast turns)
+        r_w = self._angular_velocity_punish(self.curr_vel.angular.z, r_rotation, w_thresh)
+
+        # 3. Compute the reward for aligning with the goal.
+        r_t = self._theta_reward(self.goal, self.mht_peds, self.curr_vel.linear.x, r_angle, angle_thresh)
+
+        # Total reward is a sum of all components.
+        reward = r_g + r_c + r_t + r_w 
+
+        return reward
