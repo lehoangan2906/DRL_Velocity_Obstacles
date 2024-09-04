@@ -12,6 +12,7 @@ import rclpy
 from rclpy.node import Node
 from gym import spaces
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
+from gazebo_msgs.msg import ModelState, ModelStates
 from gazebo_msgs.srv import GetModelState, SetModelState
 from nav_msgs.msg import Odometry, OccupancyGrid, Path
 from geometry_msgs.msg import Pose, Twist, Point, PoseStamped, PoseWithCovarianceStamped
@@ -298,19 +299,205 @@ class DRLNavEnv(Node):
 
     # ========================================================================= #
 
-    # Publisher functions to publish data
+    # Publisher functions to set and publish the initial state of the robot in the environment
     def _pub_initial_model_state(self, x, y, theta):
+        # Create a ModelState message to represent the robot's state in Gazebo
         robot_state = ModelState()
-        robot_state.model_name = "mobile_base"
+
+        # Specify the model name of the robot to be controlled (in this case: mobile_base)
+        robot_state.model_name = "mobile_base" # Get the pose/twist relative to the frame of the model_base
+        
+        # Set the robot's initial position in the Gazebo world (x, y, z coordinates)
         robot_state.pose.position.x = x
         robot_state.pose.position.y = y
-        robot_state.pose.position.z = 0
-        robot_state.pose.orientation.x = 0
-        robot_state.pose.orientation.y = 0
-        robot_state.pose.orientation.z = np.sin(theta/2)
-        robot_state.pose.orientation.w = np.cos(theta/2)
+        robot_state.pose.position.z = 0 # The robot is assumed to be on the ground
+
+        # Convert the yaw angle (theta) to quaternion for setting the robot's orientation
+        # Gazebo uses quaternions to represent orientation in 3D space
+        robot_state.pose.orientation.x = 0  # No roll
+        robot_state.pose.orientation.y = 0  # No pitch
+        robot_state.pose.orientation.z = np.sin(theta/2)    # Yaw converted to quaternion
+        robot_state.pose.orientation.w = np.cos(theta/2)    # Quaternion w component
+
+        # Set the reference frame for the robot, which is "world" in Gazebo
         robot_state.reference_frame = "world"
+
+        # Attempt to call the Gazebo service to update the model's state
+        # This service request will plae the robot at the specified location in the Gazebo world
         try:
-            result = self.gazebo_client.call(robot_state)
+            result = self.gazebo_client.call(robot_state) # Call the Gzebo client to update the robot's state
         except rclpy.ServiceException:
+            # If the Gazebo service fails (e.g., Gazebo is not available), handle the exception.
             pass
+
+    # Function to publish the initial position of the robot (x, y, theta) in the environment --> for localization
+    def _pub_initial_position(self, x, y, theta):
+        # Create a PoseWithCovarienaceStamped message to represent the robot's pose with uncertainty (covariance)
+        initial_pose = PoseWithCovarianceStamped()
+
+        # Set the frame of reference for this pose to "map", which is commonly used in ROS2 for navigation
+        initial_pose.header.frame_id = "map"
+
+        # Get the current time and add it to the header (important for time synchronization)
+        initial_pose.header.stamp = self.get_clock().now().to_msg()
+
+        # Set the robot's position (x, y, z coordinates)
+        initial_pose.pose.pose.position.x = x
+        initial_pose.pose.pose.position.y = y
+        initial_pose.pose.pose.position.z = 0 # Assuming the robot is on the ground (z = 0)
+
+        # Convert the yaw angle (theta) to quaternion for setting the robot's orientation
+        initial_pose.pose.pose.orientation.x = 0    # No roll
+        initial_pose.pose.pose.orientation.y = 0    # No pitch
+        initial_pose.pose.pose.orientation.z = np.sin(theta/2) # Yaw converted to quaternion (z-axis rotation)
+        initial_pose.pose.pose.orientation.w = np.cos(theta/2) # Quaternion w component
+
+        # Publish the initial pose message to the ROS topic that handles localization (e,g., for AMCL)
+        self._initial_pose_pub.publish(initial_pose)
+
+    # Function to randomly publish the goal position (x, y, theta) for the robot in the environment --> for global planner
+    def _publish_random_goal(self):
+        """
+        The function randomly selects a goal position (x, y, theta) on the map for the robot, 
+        ensuring that the goal is within a certain distance range from the robot's current position.
+        It then publishes this goal to be used by the robot's navigation system.
+        """
+
+        dis_diff = 21 
+        while dis_diff >= 7 or dis_diff < 4.2:
+            x, y, theta = self._get_random_pos_on_map(self.map)
+            dis_diff = np.linalg_norm(
+                np.array([self.curr_pose.position.x - x, self.curr_pose.position.y - y])
+            )
+        self._publish_goal(x, y, theta)
+        return x, y, theta
+    
+    # Function to publish a goal position and orientation (x, y, theta) for the robot to navigate to
+    def _publish_goal(self, x, y, theta):
+        """
+        Publishes a goal position and orientation for the robot to navigate to.
+
+        Args:
+            x (float): The x-coordinate of the goal position in the map frame.
+            y (float): The y-coordinate of the goal position in the map frame.
+            theta (float): The orientation (yaw) angle of the robot at the goal position, in radians.
+
+        This function creates a PoseStamped message with the given position and orientation,
+        and publishes it to the relevant topic, which is typically used by the robot's navigation system
+        to plan a path to the goal.
+        """
+
+        # Convert the yaw angle (theta) to a format usable for quaternion calculations
+        goal_yaw = theta
+
+        # Create a PoseStamped message, which includes position and orientation in a specific frame
+        goal = PoseStamped()
+
+        # Set the timestamp for the message to the current time, ensuring synchronization with other nodes
+        goal.header.stamp = self.get_clock().now().to_msg()
+
+        # Specify that the goal coordinates are relative to the "map" frame, which is the global reference frame.
+        goal.header.frame_id = "map"
+
+        # Set the x, y, and z coordinates for the goal position
+        goal.pose.position.x = x
+        goal.pose.position.y = y
+        goal.pose.position.z = 0    # Assuming a 2D plane, so z is set to 0
+
+        # Convert the yaw angle (theta) into a quaternion for the robot's orientation at the goal
+        # Quaternions are used in 3D space to avoid issues like gimbal lock
+        goal.pose.orientation.x = 0 # No rotation around the x-axis
+        goal.pose.orientation.y = 0 # No rotation around the y-axis
+        goal.pose.orientation.z = np.sin(goal_yaw/2) # Rotation around the z-axis (yaw)
+        goal.pose.orientation.w = np.cos(goal_yaw/2) # Rotation component to complete the quaternion
+
+        # Publish the goal to the topic that the robot's navigation stack listens to 
+        # This triggers the navigation system to start planning a path to the specified goal
+        self._initial_goal_pub.publish(goal)
+
+    # Function to find a valid (free) random position (x, y, theta) on the map
+    def _get_random_pos_on_map(self, map):
+        """
+        Generates a random valid position (x, y) and orientation (theta) on the map.
+
+        Args:
+            map (OccupancyGrid): The map data, which includes information about the map's dimentions, resolution,
+            and any obstacles.
+
+        Returns:
+            tuple: A tuple (x, y, theta) representing a random valid position (x, y) and orientation (theta) on the map.
+        """
+
+        # Calculate the total width of the map in the global coordinate system
+        map_width = map.info.width * map.info.resolution + map.info.origin.position.x
+
+        # Calculate the total height of the map in the global coordinate system
+        map_height = map.info.height * map.info.resolution + map.info.origin.position.y
+
+        # Generate a random x-coordinate within the map's width
+        x = random.uniform(0.0, map_width)
+
+        # Generate a random y-coordinate within the map's height
+        y = random.uniform(0.0, map_height)
+
+        # Define a sage radius around the robot, combining the robot's own radius with and additional safety margin
+        radius = self.ROBOT_RADIUS + 0.5
+
+        # Loop until a valid position is found (i.e., the position is free of obstacles)
+        while not self._is_pos_valid(x, y, radius, map):
+            # If the position is not valid, generate new random coordinates
+            x = random.uniform(0.0, map_width)
+            y = random.uniform(0.0, map_height)
+
+        # Generate a random orientation angle (theta) between -pi and pi
+        theta = random.uniform(-math.pi, math.pi)
+
+        # Return the valid random position and orientation as a tuple
+        return x, y, theta
+    
+    # Function to check if a position (x, y) is valid (free of obstacles) on the map
+    def _is_pos_valid(self, x, y, radius, map):
+        """
+        Checks if the position (x, y) is valid on the map, meaning it is free of obstacles and within bounds.
+
+        Args:
+            x (float): The x-coordinate of the position to check.
+            y (float): The y-coordinate of the position to check.
+            radius (float): The radius around the position to check for obstacles.
+            map (OccupancyGrid): The map data, which includes information about obstacles.
+
+        Returns:
+            bool: True if the position is valid (free of obstacles and within bounds), False otherwise
+        """
+
+        # Calculate the number of cells that correspond to the given safety radius
+        cell_radius = int(radius / map.info.resolution)
+
+        # Convert the global x, y coordinates to map grid indices
+        y_index = int((y - map.info.origin.position.y) / map.info.resolution)
+        x_index = int((x - map.info.origin.position.x) / map.info.resolution)
+
+        # Loop through the map cells within the square defined by the radius around the position
+        for i in range(x_index - cell_radius, x_index + cell_radius, 1):
+            for j in range(y_index - cell_radius, y_index + cell_radius, 1):
+                # Calculate the linear index of the cell in the map's data array
+                index = j * map.info.width + i
+
+                # Check if the index is within the bounds of the map data
+                if index >= len(map.data):
+                    return False # The index is out of bounds, so the position is invalid 
+                
+                try:
+                    # Get the value of the cell from the map's data
+                    val = map.data[index]
+                except IndexError:
+                    return False # An IndexError indicates and out-of-bounds access, so the position is invalid
+            
+                # Check if the cell is occupied by an obstacle (non-zero value means occupied )
+                if val != 0:
+                    return False # The cell is occupied, so the position is invalid
+                
+        
+        # If all cells in the checked area are free and within bounds, the position is valid
+        return True
+    
