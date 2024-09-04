@@ -1,26 +1,30 @@
 #!/usr/bin/python3
 
 import numpy as np
-import numply.matlib
+import numpy.matlib
 import random
 import math
 import gym
-from scipy.optimize import linprog, minimize
+import time
 import threading
 
 import rclpy
 from rclpy.node import Node
+
 from gym import spaces
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 from gazebo_msgs.msg import ModelState, ModelStates
 from gazebo_msgs.srv import GetModelState, SetModelState
 from nav_msgs.msg import Odometry, OccupancyGrid, Path
 from geometry_msgs.msg import Pose, Twist, Point, PoseStamped, PoseWithCovarianceStamped
-import time
+
 from sensor_msgs.msg import LaserScan
 from action_msgs.msg import GoalStatusArray
-from pedsim_msgs.msg import TrackedPersons
-from cnn_msgs.msg import CNNData
+#from pedsim_msgs.msg import TrackedPersons
+#from cnn_msgs.msg import CNNData
+
+from scipy.interpolate import interp1d # For preprocessing the lidar data
+from scipy.optimize import linprog, minimize # For optimization 
 
 
 class DRLNavEnv(Node):
@@ -243,7 +247,7 @@ class DRLNavEnv(Node):
         """
         Check if all publishers are ready
         """
-        self._check_publisher_ready(self._cmd_vel_pub))
+        self._check_publisher_ready(self._cmd_vel_pub)
         self._check_publisher_ready(self._initial_goal_pub)
         self._check_publisher_ready('/gazebo/set_model_state')
         self._check_publisher_ready(self._initial_pose_pub)
@@ -258,6 +262,7 @@ class DRLNavEnv(Node):
             self.gazebo_client.wait_for_service(timeout)
         except rclpy.ServiceException:
             pass
+
 
     # callback functions for ROS2
     # ========================================================================= #
@@ -297,7 +302,9 @@ class DRLNavEnv(Node):
         # callback function to get the pedestrian data
         self.mht_peds = trackPed_msg
 
+
     # ========================================================================= #
+    # Publisher functions for publishing informations about the robot and goal position
 
     # Publisher functions to set and publish the initial state of the robot in the environment
     def _pub_initial_model_state(self, x, y, theta):
@@ -415,7 +422,8 @@ class DRLNavEnv(Node):
         # This triggers the navigation system to start planning a path to the specified goal
         self._initial_goal_pub.publish(goal)
 
-    # Function to find a valid (free) random position (x, y, theta) on the map
+    # Function to find a valid (free) random position (x, y, theta) on the map 
+    # that the robot can potentially naviagate to
     def _get_random_pos_on_map(self, map):
         """
         Generates a random valid position (x, y) and orientation (theta) on the map.
@@ -500,4 +508,119 @@ class DRLNavEnv(Node):
         
         # If all cells in the checked area are free and within bounds, the position is valid
         return True
+    
+
+    # ========================================================================= #
+    # Observation and action functions
+
+    # Return the observation data as a vector
+    def _get_observation(self):
+        """
+        Processes and normalizes sensor data (pedestrian positions, scan data, and goal position)
+        into a single observation vector, with modifications fro the Oradar MS200 lidar specification.
+
+        - The Lidar data is split into 20-22 sefments.
+        - Interpolation is applied to handle non-uniform lidar data points.
+
+        Returns:
+            np.ndarray: A combined and normalized observation vector.
+        """
+
+        # Extract the pedestrian positions from the cnn_data structure
+        self.ped_pos = self.cnn_data.ped_pos_map
+
+        # Extract the lidar scan data from the cnn_data structure
+        self.scan = self.cnn_data.scan
+
+        # Extract the goal position from the cnn_data structure
+        self.goal = self.cnn_data.goal_cart
+
+        # Normalize the pedestrian position map (ped_pos) to the range [-1, 1]
+        v_min = -2
+        v_max = 2
+        self.ped_pos = np.array(self.ped_pos, dtype = np.float32)
+        self.ped_pos = 2 * (self.ped_pos - v_min) / (v_max - v_min) + (-1)
+
+        # Process and normalize the lidar scan data (Oradar MS200)
+        # Handling missing data (NaN or zero values) by interpolation
+        lidar_resolution_deg = 0.8 # Angular resolution of the Oradar MS200 lidar
+        fov = 360
+        num_lidar_points = int(fov / lidar_resolution_deg) # Total number of lidar points (theoretically)
+        num_segments = 18
+        segment_size = num_lidar_points // num_segments # Number of points per segment
+
+        # Handle missing values (NaNs or zeros) using interpolation
+        lidar_data = np.array(self.scan, dtype=np.float32)
+        angles = np.linspace(0, fov, num=num_lidar_points, endpoint=False) # generate an array of equally spaced values between 0 and fov (not including fov)
+
+        # Replace zeros and NaNs with interpolated values
+        # Valid range: 0.03 to 12 meters
+        valid_mask = np.logical_and(lidar_data > 0.03, lidar_data <= 12) # return a boolean mask indicating whether the values satisfy the condition
+        
+        if not np.all(valid_mask): # check if all elements in the valid_mask array evaluate to True
+            # Interpolate the missing values (zeros or NaNs)
+            valid_angles = angles[valid_mask]
+            valid_data = lidar_data[valid_mask]
+            interpolation_function = interp1d(valid_angles, valid_data, kind='linear', fill_value="extrapolate") # takes in two arrays. Then perform linear interpolation and extrapolation
+            lidar_data = interpolation_function(angles)
+             
+        # Split the lidar data into 18 segments and compute the minimum and mean values
+        scan_avg = np.zeros((2, num_segments))
+        for n in range(num_segments):
+            segment_data = lidar_data[n * segment_size: (n + 1) * segment_size]
+            scan_avg[0, n] = np.min(segment_data) # Minimum value in the segment
+            scan_avg[1, n] = np.mean(segment_data) # Mean value in the segment
+
+        # Flatten the scan data for processing
+        scan_avg_flat = scan_avg.flatten()
+        s_min = 0.03 # Minimum lidar range
+        s_max = 12.0 # Maximum lidar range
+        self.scan = 2 * (scan_avg_flat - s_min) / (s_max - s_min) + (-1) # Normalize to [-1, 1]
+
+        # Normalize the goal position to the range [-1, 1] to ensuere all input data is on the same scale.
+        g_min = -2
+        g_max = 2
+        self.goal = np.array(self.goal, dtype=np.float32)
+        self.goal = 2 * (self.goal - g_min) / (g_max - g_min) + (-1)
+
+        # Combine the normalized pedestrian positions, scan data, and goal position into a single observation vector
+        self.observation = np.concatenate((self.ped_pos, self.scan, self.goal), axis = None)
+
+        # Return the combined observation vector
+        return self.observation
+    
+    # collect and return key pieces of information about the robot's state
+    # including initial pose, current pose, and goal position
+    def _post_information(self):
+        self.info = {
+            "initial_pose": self.init_pose,
+            "goal_position": self.goal_position,
+            "current_pose": self.curr_pose
+        }
+        return self.info
+    
+    # Translate a given action into velocity commands, then publishing these commands to the robot
+    def _take_action(self, action):
+        # Create a Twist message
+        cmd_vel = Twist()
+
+        # Define the desired range for linear velocity
+        vx_min = -0.65  # Minimum linear velocity
+        vx_max = 0.65   # Maximum linear velocity
+
+        # Define the desired range for angular velocity
+        vz_min = -1.85  # Minimum angular velocity
+        vz_max = 1.85   # Maximum angular velocity
+
+        # Scale action[0] (linear velocity) from the range [-1, 1] to [-0.65, 0.65]
+        cmd_vel.linear.x = (action[0] + 1) * (vx_max - vx_min) / 2 + vx_min
+
+        # Scale action[1] (angular velocity) from the range [-1, 1] to [-1.85, 1.85]
+        cmd_vel.angular.z = (action[1] + 1) * (vz_max - vz_min) / 2 + vz_min
+
+        # Publish the velocity command
+        self._cmd_vel_pub.publish(cmd_vel)
+
+    # ========================================================================= #
+    # Reward computation
     
