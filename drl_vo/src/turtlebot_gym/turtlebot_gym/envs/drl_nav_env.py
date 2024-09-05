@@ -855,4 +855,79 @@ class DRLNavEnv(Node):
     
     # ========================================================================= #
     # Done flag computation
-    
+
+    # Determine whether the current episode (i.e., the task or goal the robot is trying to accomplish) has ended.
+    def _is_done(self, reward):
+        """
+        Determines whether the current episode should end based on several conditions:
+        - The robot reaches the goal.
+        - The robot collides with obstacles a certain number of times.
+        - The maximum number of iterations is exceeded.
+
+        Args:
+            reward (float): Current reward (not used directly in this function).
+
+        Returns:
+            bool: True if the episode is done, False otherwise.
+        """
+
+        # Increment the number of iterations (i.e., time steps taken in the current episode)
+        self.num_iterations += 1
+
+        # Calculate the Euclidean distance between the robot's urrent position and the goal position.
+        dist_to_goal = np.linalg.norm(
+            np.array([
+                self.curr_pose.position.x - self.goal_position.x, # Difference in x-coordinates
+                self.curr_pose.position.y - self.goal_position.y, # Difference in y-coordinates
+                self.curr_pose.position.z - self.goal_position.z # Difference in z-coordinates
+            ])
+        )
+
+        # Condition 1: Check if the robot has reached the goal (within the defined goal radius)
+        if dist_to_goal <= self.GOAL_RADIUS:
+            self._cmd_vel_pub.publish(Twist()) # Stop the robot by sending a zero velocity command
+            self._episode_done = True # Mark the episode as done
+            return True # Return True indicating that the episode is finished
+        
+        # Fetch the latest scan data (e.g., from the lidar) to check the proximity of obstacles
+        scan = self.cnn_data.scan[-450: ] # Use the last 450 scan points 
+
+        # Handle missing or zero values in the lidar data using interpolation
+        scan[scan == 0] = np.nan # Convert zero values (which indicate missing data) to NaN
+        valid_indices = np.where(~np.isnan(scan))[0] # Indices of valid (non-NaN) data
+        valid_scan = scan[valid_indices] # Extract valid scan data 
+
+        if len(valid_scan) < 2: # If there are too few valid points to interpolate, set default safe distance
+            min_scan_dist = 12.0 
+        else: 
+            # Interpolate missing values in the scan data
+            interp_func = interp1d(valid_indices, valid_scan, bounds_error=False, fill_value="extrapolate")
+            scan_filled = interp_func(np.arange(len(scan))) # Fill missing data with interpolation
+            min_scan_dist = np.amin(scan_filled) # Find the closest obstacle distance
+
+        # Ensure min_scan_dist falls within the lidar's valid range of [0.03, 12] meters
+        min_scan_dist = np.clip(min_scan_dist, 0.03, 12.0)
+
+        # Condition 2: Check if the robot is colliding with an obstacle
+        # If the robot is too close to an obstacle (distance <= robot_radius), increment the bump counter
+        if min_scan_dist <= self.ROBOT_RADIUS and min_scan_dist >= 0.03:
+            self.bump_num += 1 # Increment the bump counter if the robot is too close
+
+        # Condition 3: If the robot has collided with obstacles more than 3 times, end the episode
+        if self.bump_num >= 3:
+            self._cmd_vel_pub.publish(Twist()) # Stop the robot by sending a zero velocity command
+            self.bump_num = 0 # Reset the bump counter for the next episode
+            self._episode_done = True # Mark the episode as done
+            self._reset = True # Flag the environment for a reset after the episode end
+            return True # Return True indicating that the episode is finished
+        
+        # Condition 4: Check if the robot has exceeded the maximum number of allowed iteration
+        max_iteration = 512 # Set the maximum number of iterations allowed for one episode
+        if self.num_iterations > max_iteration:
+            self._cmd_vel_pub.publish(Twist()) # Stop the robot by sending a zero velocity command
+            self._episode_done = True # Mark the episode as done
+            self._reset = True # Flag the environment for a reset after the episode end
+            return True
+        
+        # If none of the termination conditions are met, the episode continues
+        return False # Return False indicating that the episode is still ongoing
