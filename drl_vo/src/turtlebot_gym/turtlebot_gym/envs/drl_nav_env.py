@@ -20,8 +20,8 @@ from geometry_msgs.msg import Pose, Twist, Point, PoseStamped, PoseWithCovarianc
 
 from sensor_msgs.msg import LaserScan
 from action_msgs.msg import GoalStatusArray
-#from pedsim_msgs.msg import TrackedPersons
-#from cnn_msgs.msg import CNNData
+from pedsim_msgs.msg import TrackedPersons
+from cnn_msgs.msg import CNN_Data
 
 from scipy.interpolate import interp1d # For preprocessing the lidar data
 from scipy.optimize import linprog, minimize # For optimization 
@@ -67,7 +67,7 @@ class DRLNavEnv(Node):
         self.action_space = spaces.Box(low=self.low_action, high=self.high_action, dtype=np.float32)
 
         # Observation space
-        self.cnn_data = CNNData()
+        self.cnn_data = CNN_Data()
         self.ped_pos = []
         self.scan = []
         self.goal = []
@@ -99,7 +99,7 @@ class DRLNavEnv(Node):
         # ROS 2 Subscriptions
         qos = QoSProfile(depth = 10, reliability=QoSReliabilityPolicy.RELIABLE)
         self._map_sub = self.create_subscription(OccupancyGrid, "/map", self._map_callback, qos)
-        self._cnn_data_sub = self.create_subscription(CNNData, "/cnn_data", self._cnn_data_callback, qos)
+        self._cnn_data_sub = self.create_subscription(CNN_Data, "/cnn_data", self._cnn_data_callback, qos)
         self._robot_pos_sub = self.create_subscription(PoseStamped, "/robot_pose", self._robot_pose_callback, qos)
         self._robot_vel_sub = self.create_subscription(Odometry, '/odom', self._robot_vel_callback, qos)
         self._final_goal_sub = self.create_subscription(PoseStamped, "/move_base/current_goal", self._final_goal_callback, qos)
@@ -227,7 +227,7 @@ class DRLNavEnv(Node):
         Check if all subscribers are ready
         """
         self._check_subscriber_ready("/map", OccupancyGrid)
-        self._check_subscriber_ready("/cnn_data", CNNData)
+        self._check_subscriber_ready("/cnn_data", CNN_Data)
         self._check_subscriber_ready("/robot_pose", PoseStamped)
         self._check_subscriber_ready("/move_base/status", GoalStatusArray)
 
@@ -422,46 +422,65 @@ class DRLNavEnv(Node):
         # This triggers the navigation system to start planning a path to the specified goal
         self._initial_goal_pub.publish(goal)
 
-    # Function to find a valid (free) random position (x, y, theta) on the map 
-    # that the robot can potentially naviagate to
-    def _get_random_pos_on_map(self, map):
+    # Function to generate a random position relative to the robot by considering the
+    # surrounding environment as detected by the lidar, which is essential for ensuring the
+    # robot generates a valid random local position that avoids obstacles.
+    def _get_random_local_pos(self):
         """
-        Generates a random valid position (x, y) and orientation (theta) on the map.
-
-        Args:
-            map (OccupancyGrid): The map data, which includes information about the map's dimentions, resolution,
-            and any obstacles.
+        Generates a random valid local position (relative to the robot) using lidar data.
+        Handles non-uniform lidar data (missing values) by using interpolation.
 
         Returns:
-            tuple: A tuple (x, y, theta) representing a random valid position (x, y) and orientation (theta) on the map.
+            tuple: A tuple (x, y, theta) representing a random position (in meters) and 
+            orientation (theta in radians) relative to the robot.
         """
 
-        # Calculate the total width of the map in the global coordinate system
-        map_width = map.info.width * map.info.resolution + map.info.origin.position.x
+        # Parameters for generating local random positions
+        max_range = 5.0 # Maximum range for considering random positions
+        min_range = 0.5 # Minimum safe range from the robot
+        lidar_resolution_deg = 0.8 # Angular resolution of the Oradar MS200 lidar
+        fov = 360 # Field of view of the lidar in degrees
 
-        # Calculate the total height of the map in the global coordinate system
-        map_height = map.info.height * map.info.resolution + map.info.origin.position.y
+        # Fetch the lidar data
+        lidar_data = np.array(self.cnn_data.scan, dtype=np.float32)
+        num_lidar_points = int(fov / lidar_resolution_deg) # Total number of lidar points
 
-        # Generate a random x-coordinate within the map's width
-        x = random.uniform(0.0, map_width)
+        # Generate the correspoinding angles for each lidar point
+        angles = np.linspace(0, np.deg2rad(fov), num=num_lidar_points, endpoint=False)
 
-        # Generate a random y-coordinate within the map's height
-        y = random.uniform(0.0, map_height)
+        # Handle missing lidar values (e.g., zeros or NaNs) by interpolation
+        valid_mask = np.logical_and(lidar_data > 0.03, lidar_data <= 12.0) # Consider values within a valid range
 
-        # Define a sage radius around the robot, combining the robot's own radius with and additional safety margin
-        radius = self.ROBOT_RADIUS + 0.5
+        if not np.all(valid_mask): # If there are missing or invalid values, perform interpolation
+            valid_angles = angles[valid_mask]
+            valid_data = lidar_data[valid_mask]
+            if len(valid_data) > 1: # Ensure there are enough valid points for interpolation
+                interp_func = interp1d(valid_angles, valid_data, kind='linear', fill_value="extrapolate")
+                lidar_data = interp_func(angles)
 
-        # Loop until a valid position is found (i.e., the position is free of obstacles)
-        while not self._is_pos_valid(x, y, radius, map):
-            # If the position is not valid, generate new random coordinates
-            x = random.uniform(0.0, map_width)
-            y = random.uniform(0.0, map_height)
+        
+        # Find valid positions by checking if lidar data points are within the specified range
+        valid_positions = np.where((lidar_data > min_range) & (lidar_data <= max_range))[0]
 
-        # Generate a random orientation angle (theta) between -pi and pi
-        theta = random.uniform(-math.pi, math.pi)
+        if len(valid_positions) == 0:
+            # If no valid positions are found, default to the robot staying in place
+            return 0.0, 0.0, 0.0
+        
+        # Randomly select one of the valid positions
+        random_idx = np.random.cboice(valid_positions)
+        random_angle = angles[random_idx] # Corresponding angle for the selected position
+        random_distance = lidar_data[random_idx] # Distance corresponding to the selected angle
 
-        # Return the valid random position and orientation as a tuple
+        # Convert polar coordinates (distance, angle) to Cartesian coordinates (x, y)
+        x = random_distance * np.cos(random_angle)
+        y = random_distance * np.sin(random_angle)
+
+        # Generate a random orientation (theta) for the robot to face at the new position
+        theta = random.uniform(-np.pi, np.pi)
+
+        # Return the generated random position and orientation
         return x, y, theta
+
     
     # Function to check if a position (x, y) is valid (free of obstacles) on the map
     def _is_pos_valid(self, x, y, radius, map):
