@@ -631,6 +631,7 @@ class DRLNavEnv(Node):
     # ========================================================================= #
     # Reward computation
 
+    # compute goal reaching reward
     def _goal_reached_reward(self, r_arrival, r_waypoint):
         """
         Computes the reward based on how close the robot is to the goal.
@@ -683,6 +684,130 @@ class DRLNavEnv(Node):
         # Return the calculated reward (positive for progress or goal reached, negative for failure)
         return reward
 
+    # Punishment after collision with obstacles
+    def _obstacle_collision_punish(self, scan, r_scan, r_collision):
+        """
+        Computes the penalty for being too close to or colliding with obstacles based on lidar scan data.
+
+        Args:
+            scan (np.array): Lidar scan data (distances to obstacles).
+            r_scan (float): Penalty factor for proximity to obstacles.
+            r_collision (float): Penalty factor for colliding with an obstacle (i.e. getting too close)
+
+        Returns:
+            float: The computed penalty based on proximity to obstacles.
+        """
+
+        # Find the minimum distance from the lidar scan, ignoring zaro values (which indicate no reading)
+        min_scan_dist = np.amin(scan[scan != 0])
+
+        # Case 1: The robot is very close to an obstacle, potentially colliding (distance less than or equal to its radius)
+        if min_scan_dist <= self.ROBOT_RADIUS and min_scan_dist >= 0.03:
+            reward = r_collision # Apply a significant penalty for a collision
+
+        # Case 2: The robot is near an obstacle but not colliding (distance within 3 times its radius)
+        elif min_scan_dist < 3 * self.ROBOT_RADIUS:
+            reward = r_scan * (3 * self.ROBOT_RADIUS - min_scan_dist) # Apply a smaller penalty based on proximity
+
+        # Case 3: The robot is far enough from obstacles (no penalty)
+        else:
+            reward = 0.0
+
+        return reward
+
+    # Punishment for high angular velocity (fast turns)
+    def _angular_velocity_punish(self, w_z, r_rotation, w_thresh):
+        """
+        Computes the penalty for excessive angular velocity (rotational speed).
+
+        Args:
+            w_z (float): The robot's current angular velocity (rotational speed around the z-axis).
+            r_rotation (float): Penalty factor for angular velocity.
+            w_thresh (float): Threshold for penalizing excessive angular velocity.
+
+        Returns:
+            float: The computed penalty based on the angular velocity.
+        """
+        
+        # Case 1: If the angular velocity exceeds the threshold, apply a penalty
+        if abs(w_z) > w_thresh:
+            reward = abs(w_z) * r_rotation # Penalty increases with higher angular velocity 
+        
+        # Case 2: If the angular velocity is within acceptable limits, no penalty is given
+        else:
+            reward = 0.0
+        
+        return reward
+
+
+    # Reward for aligning with the goal
+    def _theta_reward(self, goal, mht_peds, v_x, r_angle, angle_thresh):
+        """
+        Computes a reward for aligning the robot's heading with the goal direction,
+        while considering the presence of pedestrians to avoid collisions.
+
+        Args:
+            goal (np.array): The goal's position relative to the robot.
+            mht_peds (object): Pedestrian tracking data (positions and velocities of pedestrians).
+            v_x (float): The robot's current linear velocity (forward motion).
+            r_angle (float): Reward factor for maintaining alignment with the goal.
+            angle_thresh (float): Threshold for the angular reward (maximum allowable deviation).
+
+        Returns:
+            float: The computed reward based on heading alignment and pedestrian avoidance.
+        """
+
+        # Calculate the preferred angle (theta) to the goal in counter clockwise direction (robot's heading relative to the goal position)
+        # Read more about this formula at: https://en.wikipedia.org/wiki/Atan2
+        theta_pre = np.arctan2(goal[1], goal[0])
+
+        d_theta = theta_pre # Initialize the heading difference as the preferred angle 
+
+        # Case 1: If there are pedestrians in the scene
+        if len(mht_peds.tracks) != 0:
+            d_theta = np.pi / 2 # Set initial delta theta to 90 degrees (default avoidance angle)
+            N = 60 # Number of random angle samples to check for safe movement
+            theta_min = 1000 # Large initial value for minimum angle difference
+
+            # Sample random angles to find a safe direction to move
+            for i in range(N):
+                theta = random.uniform(-np.pi, np.pi) # Random ange in range [-pi, pi]
+                free = True # Assume the angle is free from obstacles/pedestrians
+
+                # Loop through the tracked pedestrians to check for potential collisions
+                for ped in mht_peds.tracks:
+                    p_x = ped.pose.pose.position.x # Pedestrian's x-position
+                    p_y = ped.pose.pose.position.y
+                    p_vx = ped.twist.twist.linear.x # Pedestrian's x-velocity
+                    p_vy = ped.twist.twist.linear.y
+
+                    # Calculate the distance to the pedestrian
+                    ped_dis = np.linalg.norm([p_x, p_y])
+
+                    # If the pedestrian is within a 7m radius, check for collision potential
+                    if ped_dis <= 7:
+                        ped_theta = np.arctan2(p_y, p_x) # Pedestrian's angle relative to the robot
+                        vo_theta = np.arctan2(3 * self.ROBOT_RADIUS, np.sqrt(ped_dis ** 2 - (3 * self.ROBOT_RADIUS) ** 2))
+
+                        # Calculate the relative angle between the robot and pedestrian to avoid collision
+                        theta_rp = np.arctan2(v_x * np.sin(theta) - p_vy, v_x * np.cos(theta) - p_vx)
+
+                        # If the angle overlaps with the pedestrian's path (collision cone), mark as unsafe
+                        if theta_rp >= (ped_theta - vo_theta) and theta_rp <= (ped_theta + vo_theta):
+                            free = False
+                            break
+
+                
+        # Case 2: If there are no pedestrians, simply align with the goal
+        else:
+            d_theta = theta_pre
+
+        # Calculate the reward based on the angular difference from the goal direction 
+        reward = r_angle * (angle_thresh - abs(d_theta))
+
+        return reward
+
+    # Aggregate reward computation
     def _compute_reward(self):
         """
         Computes the total reward for the robot's action based on various criteria such as:
@@ -711,7 +836,7 @@ class DRLNavEnv(Node):
         angle_thresh = np.pi / 6 # Angle threshold (30 degrees)
         w_thresh = 1 # Angular velocity threshold
 
-        # 1. COmpute the reward for reaching or moving toward the goal
+        # 1. Compute the reward for reaching or moving toward the goal
         r_g = self._goal_reached_reward(r_arrival, r_waypoint)
 
         # 2. Compute the penalty for collisions or being too close to obstacles
@@ -727,3 +852,7 @@ class DRLNavEnv(Node):
         reward = r_g + r_c + r_t + r_w 
 
         return reward
+    
+    # ========================================================================= #
+    # Done flag computation
+    
