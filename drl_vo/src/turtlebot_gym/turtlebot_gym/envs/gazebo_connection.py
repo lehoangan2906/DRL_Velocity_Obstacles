@@ -1,81 +1,79 @@
+#!/usr/bin/env python3
+
 import rclpy
+from rclpy.node import Node
 from std_srvs.srv import Empty
-from gazebo_msgs.msg import ODEPhysics
-from gazebo_msgs.srv import SetPhysicsProperties
-from std_msgs.msg import Float64
+from gazebo_msgs.srv import SetPhysicsProperties, SetPhysicsPropertiesRequest
 from geometry_msgs.msg import Vector3
+from std_msgs.msg import Float64
 
+class GazeboConnection(Node):
 
-class GazeboConnection():
-    
     def __init__(self, start_init_physics_parameters, reset_world_or_sim):
-        
-        self.unpause = self.create_service_client('/gazebo/unpause_physics', Empty)
-        self.pause = self.create_service_client('/gazebo/pause_physics', Empty)
-        self.reset_simulation_proxy = self.create_service_client('/gazebo/reset_simulation', Empty)
-        self.reset_world_proxy = self.create_service_client('/gazebo/reset_world', Empty)
+        super().__init__('gazebo_connection')
 
-        # Setup the Gravity Controle system
-        service_name = '/gazebo/set_physics_properties'
-        self.set_physics = self.create_service_client(service_name, SetPhysicsProperties)
+        # Create clients for Gazebo services
+        self.unpause_client = self.create_client(Empty, '/gazebo/unpause_physics')
+        self.pause_client = self.create_client(Empty, '/gazebo/pause_physics')
+        self.reset_sim_client = self.create_client(Empty, '/gazebo/reset_simulation')
+        self.reset_world_client = self.create_client(Empty, '/gazebo/reset_world')
+        self.set_physics_client = self.create_client(SetPhysicsProperties, '/gazebo/set_physics_properties')
+
         self.start_init_physics_parameters = start_init_physics_parameters
         self.reset_world_or_sim = reset_world_or_sim
+
         self.init_values()
-        # We always pause the simulation, important for legged robots learning
-        self.pause_sim()
+        self.pauseSim()
 
-    def create_service_client(self, service_name, service_type):
-        client = self.node.create_client(service_type, service_name)
-        while not client.wait_for_service(timeout_sec=1.0):
-            self.node.get_logger().info('Waiting for service %s...' % service_name)
-        return client
+    def pauseSim(self):
+        self.get_logger().info('Pausing Gazebo simulation...')
+        self.call_service(self.pause_client)
 
-    def pause_sim(self):
-        try:
-            self.pause()
-        except Exception as e:
-            print ("/gazebo/pause_physics service call failed")
-        
-    def unpause_sim(self):
-        try:
-            self.unpause()
-        except Exception as e:
-            print ("/gazebo/unpause_physics service call failed")
-    
-    def reset_sim(self):
+    def unpauseSim(self):
+        self.get_logger().info('Unpausing Gazebo simulation...')
+        self.call_service(self.unpause_client)
+
+    def resetSim(self):
+        """
+        Reset the simulation or the world based on the reset type.
+        """
         if self.reset_world_or_sim == "SIMULATION":
-            print("SIMULATION RESET")
-            self.reset_simulation()
+            self.get_logger().info("Resetting SIMULATION...")
+            self.call_service(self.reset_sim_client)
         elif self.reset_world_or_sim == "WORLD":
-            print("WORLD RESET")
-            self.reset_world()
-        elif self.reset_world_or_sim == "NO_RESET_SIM":
-            print("NO RESET SIMULATION SELECTED")
+            self.get_logger().info("Resetting WORLD...")
+            self.call_service(self.reset_world_client)
         else:
-            print("WRONG Reset Option:"+str(self.reset_world_or_sim))
-    
-    def reset_simulation(self):
-        try:
-            self.reset_simulation_proxy()
-        except Exception as e:
-            print ("/gazebo/reset_simulation service call failed")
+            self.get_logger().info("NO RESET SELECTED")
 
-    def reset_world(self):
-        try:
-            self.reset_world_proxy()
-        except Exception as e:
-            print ("/gazebo/reset_world service call failed")
+    def call_service(self, client):
+        """
+        Helper function to call a service client and wait for response.
+        """
+        client.wait_for_service(timeout_sec=5.0)
+        request = Empty.Request()
+        future = client.call_async(request)
+        rclpy.spin_until_future_complete(self, future)
+        if future.result() is not None:
+            self.get_logger().info(f'Service call success: {client.srv_type}')
+        else:
+            self.get_logger().error(f'Service call failed: {client.srv_type}')
 
     def init_values(self):
-        self.reset_sim()
-
+        """
+        Initialize the simulation physics parameters and reset the simulation.
+        """
+        self.resetSim()
         if self.start_init_physics_parameters:
-            print("Initialising Simulation Physics Parameters")
+            self.get_logger().info("Initializing Simulation Physics Parameters")
             self.init_physics_parameters()
         else:
-            print("NOT Initialising Simulation Physics Parameters")
-        
+            self.get_logger().info("Skipping Physics Parameters Initialization")
+
     def init_physics_parameters(self):
+        """
+        Initialize the physics parameters, like gravity, time step, and max update rate.
+        """
         self._time_step = Float64()
         self._time_step.data = 0.001
         self._max_update_rate = Float64()
@@ -86,7 +84,7 @@ class GazeboConnection():
         self._gravity.y = 0.0
         self._gravity.z = -9.81
 
-        self._ode_config = ODEPhysics()
+        self._ode_config = SetPhysicsPropertiesRequest().ode_config
         self._ode_config.auto_disable_bodies = False
         self._ode_config.sor_pgs_precon_iters = 0
         self._ode_config.sor_pgs_iters = 50
@@ -99,33 +97,34 @@ class GazeboConnection():
         self._ode_config.max_contacts = 20
 
         self.update_gravity_call()
-        
-    def update_gravity_call(self):
-        self.pause_sim()
 
-        set_physics_request = SetPhysicsProperties_Request()
+    def update_gravity_call(self):
+        """
+        Update the gravity and physics properties in the Gazebo world.
+        """
+        self.pauseSim()
+
+        set_physics_request = SetPhysicsPropertiesRequest()
         set_physics_request.time_step = self._time_step.data
         set_physics_request.max_update_rate = self._max_update_rate.data
         set_physics_request.gravity = self._gravity
         set_physics_request.ode_config = self._ode_config
 
-        result = self.set_physics(set_physics_request)
-        print("Gravity Update Result==" + str(result.success) + ",message==" + str(result.status_message))
+        self.get_logger().info(f"Setting gravity to: {set_physics_request.gravity}")
+        future = self.set_physics_client.call_async(set_physics_request)
+        rclpy.spin_until_future_complete(self, future)
+        if future.result() is not None:
+            self.get_logger().info(f"Gravity update result: {future.result().success}")
+        else:
+            self.get_logger().error("Failed to update gravity")
 
-        self.unpause_sim()
+        self.unpauseSim()
 
     def change_gravity(self, x, y, z):
+        """
+        Change gravity dynamically.
+        """
         self._gravity.x = x
         self._gravity.y = y
         self._gravity.z = z
-
         self.update_gravity_call()
-
-def main(args=None):
-    rclpy.init(args=args)
-    gazebo_connection = GazeboConnection(start_init_physics_parameters=True, reset_world_or_sim="SIMULATION")
-    rclpy.spin(gazebo_connection.node)
-    rclpy.shutdown()
-
-if __name__ == '__main__':
-    main()
