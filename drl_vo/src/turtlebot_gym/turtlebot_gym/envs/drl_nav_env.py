@@ -158,48 +158,6 @@ class DRLNavEnv(Node):
         self._set_init()
         return True
 
-    """
-    def _set_init(self):
-        
-        # Set initial condition for simulation
-        
-        self._cmd_vel_pub.publish(Twist()) # Stop the robot by sending 0 velocity
-
-        if self._reset:
-            self._reset = False
-            self._check_all_systems_ready()
-
-            self.pos_valid_flag = False
-            map = self.map 
-
-            while not self.pos_valid_flag:
-                seed_initial_pose = random.randint(0, 18)
-                self._set_initial_pose(seed_initial_pose)
-                time.sleep(4)
-                x = self.curr_pose.position.x
-                y = self.curr_pose.position.y
-                radius = self.ROBOT_RADIUS
-                self.pos_valid_flag = self._is_pos_valid(x, y, radius, map)
-
-        goal_x, goal_y, goal_yaw = self._publish_random_goal()
-
-        time.sleep(1)
-        self._check_all_systems_ready()
-
-        self.init_pose = self.curr_pose
-        self.curr_pose = self.curr_pose
-        self.goal_position.x = goal_x
-        self.goal_position.y = goal_y
-
-        self.pos_valid_flag = True
-        self.bump_flag = False
-        self.num_iterations = 0
-        self.dist_to_goal_reg = np.zeros(self.DIST_NUM)
-        self._episode_done = False
-
-        return self.init_pose, self.goal_position
-    """
-
     def _set_initial_pose(self, seed_initial_pose):
         # Set initial pose of the robot
 
@@ -269,26 +227,21 @@ class DRLNavEnv(Node):
     # callback functions for ROS2
     # ========================================================================= #
 
-    """
-    def _map_callback(self, map_msg):
-        # Callback function to get the map
-        self.map = map_msg
-    """
     
     def _set_init(self):
         """
-        Set initial condition for simulation and robot, ensuring that the robot is stopped,
+        Set initial condition for the simulation and robot, ensuring the robot is stopped, 
         its initial position is set, and a valid goal is generated dynamically based on real-time sensor data.
         """
 
-        # Stop the robot by sending 0 velocity (ensures it doesn't move during initialization)
+        # Stop the robot by sending a zero-velocity command (ensures it doesn't move during initialization).
         self._cmd_vel_pub.publish(Twist())
 
         if self._reset:
             # Flag indicating whether the environment needs to be reset.
             self._reset = False
 
-            # Ensure all systems (sensors, publishers, subscribers) are ready before proceeding
+            # Ensure all systems (sensors, publishers, subscribers) are ready before proceeding.
             self._check_all_systems_ready()
 
             # Initialize a flag to track whether the initial position is valid.
@@ -296,23 +249,26 @@ class DRLNavEnv(Node):
 
             # Begin the process of setting the robot's initial position (no reliance on a global map).
             while not self.pos_valid_flag:
-                # Randomly choose an initial pose from predefined seed values (or any custom logic)
+                # Randomly choose an initial pose from predefined seed values (or any custom logic).
                 seed_initial_pose = random.randint(0, 18)
+
+                # Set the robot's initial pose using the randomly selected seed.
+                self._set_initial_pose(seed_initial_pose)
 
                 # Wait for a short period to allow systems to update before checking position validity.
                 time.sleep(4)
 
-                # Obtain the current position of the robot from its pose (no map info used here)
+                # Obtain the current position of the robot from its pose (no map info used here).
                 x = self.curr_pose.position.x
-                y = self.curr_pose.position.y 
+                y = self.curr_pose.position.y
 
-                # Define the radius for checking validity
+                # Define the radius for checking validity (based on the robot's physical size).
                 radius = self.ROBOT_RADIUS
 
-                # Validate whether the selected position is free of obstacles using sensor data
+                # Validate whether the selected position is free of obstacles using sensor data (no global map).
                 self.pos_valid_flag = self._is_pos_valid(x, y, radius, scan_data=self.cnn_data.scan)
 
-        # Generate a random valid goal position using the dynamic goal generation method
+        # Generate a random valid goal position using the dynamic goal generation method.
         goal_x, goal_y, goal_yaw = self._publish_random_goal()
 
         # Wait for a short period to ensure all systems are updated with the new goal.
@@ -324,16 +280,19 @@ class DRLNavEnv(Node):
         # Store the current robot position as the initial position (for logging and tracking).
         self.init_pose = self.curr_pose
 
+        # Update the current pose with the robot's present location.
+        self.curr_pose = self.curr_pose
+
         # Store the generated goal position for further use during the episode.
         self.goal_position.x = goal_x
         self.goal_position.y = goal_y
 
         # Set flags to indicate a valid starting state and reset various counters for the episode.
-        self.pos_valid_flag = True # Mark that the initial position is valid
-        self.bump_flag = False # Reset the bumper/collision flag.
-        self.num_iterations = 0 # Reset the iteration counter for the episode.
-        self.dist_to_goal_reg = np.zeros(self.DIST_NUM) # Initialize the distance-to-goal tracking array.
-        self._episode_done = False # Mark the episode as not yet complete.
+        self.pos_valid_flag = True  # Mark that the initial position is valid.
+        self.bump_flag = False  # Reset the bump/collision flag.
+        self.num_iterations = 0  # Reset the number of iterations for this episode.
+        self.dist_to_goal_reg = np.zeros(self.DIST_NUM)  # Initialize the distance-to-goal tracking array.
+        self._episode_done = False  # Mark the episode as not yet complete.
 
         # Return the initial pose and the generated goal position.
         return self.init_pose, self.goal_position
