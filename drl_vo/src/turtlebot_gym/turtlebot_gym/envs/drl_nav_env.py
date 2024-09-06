@@ -21,8 +21,8 @@ from geometry_msgs.msg import Pose, Twist, Point, PoseStamped, PoseWithCovarianc
 
 from sensor_msgs.msg import LaserScan
 from action_msgs.msg import GoalStatusArray
-#from pedsim_msgs.msg import TrackedPersons
-#from cnn_msgs.msg import CNN_Data
+from pedsim_msgs.msg import TrackedPersons
+from cnn_msgs.msg import CNN_Data
 
 from scipy.interpolate import interp1d # For preprocessing the lidar data
 from scipy.optimize import linprog, minimize # For optimization 
