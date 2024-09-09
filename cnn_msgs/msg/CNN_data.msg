@@ -1,3 +1,7 @@
+# This file defines a custom message format for the cnn_msgs package.
+# It aggregates several types of sensor data.
+
+
 float32[] ped_pos_map		# pedestrian's position costmap in Cartesian coordinate: 2 channel, 20m * 20m
 float32[] scan	  	# 720 range data from the laser scan
 float32[] scan_all	# 1080 range data from the laser scan

@@ -1,3 +1,9 @@
+# This file is used to define the build process of the cnn_msgs package. Its main purposes are:
+# - Define the build configuration.
+# - Specify the dependencies of the package.
+# - Generate ROS 2 interface code from message files.
+# - Ensure that the project can be build and integrated correctly within the ROS2 ecosystem.
+
 # Specify the minimum version of CMake required to build this project
 cmake_minimum_required(VERSION 3.5)
 
