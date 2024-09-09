@@ -1,0 +1,45 @@
+// generated from rosidl_adapter/resource/msg.idl.em
+// with input from cnn_msgs/msg/CnnData.msg
+// generated code does not contain a copyright notice
+
+
+module cnn_msgs {
+  module msg {
+    @verbatim (language="comment", text=
+      "This file defines a custom message format for the cnn_msgs package." "\n"
+      "It aggregates several types of sensor data.")
+    struct CnnData {
+      @verbatim (language="comment", text=
+        "pedestrian's position costmap in Cartesian coordinate: 2 channel, 20m * 20m")
+      sequence<float> ped_pos_map;
+
+      @verbatim (language="comment", text=
+        "720 range data from the laser scan")
+      sequence<float> scan;
+
+      @verbatim (language="comment", text=
+        "1080 range data from the laser scan")
+      sequence<float> scan_all;
+
+      @verbatim (language="comment", text=
+        "image data from the zed camera")
+      sequence<float> image_gray;
+
+      @verbatim (language="comment", text=
+        "depth image data from the zed camera")
+      sequence<float> depth;
+
+      @verbatim (language="comment", text=
+        "current goal in robot frame")
+      sequence<float> goal_cart;
+
+      @verbatim (language="comment", text=
+        "final goal in robot frame")
+      sequence<float> goal_final_polar;
+
+      @verbatim (language="comment", text=
+        "current velocity in robot frame")
+      sequence<float> vel;
+    };
+  };
+};
