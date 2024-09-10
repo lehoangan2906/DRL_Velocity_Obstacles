@@ -8,7 +8,7 @@ import rclpy
 from rclpy.node import Node
 from cnn_msgs.msg import CnnData
 from geometry_msgs.msg import Point, Twist
-from pedsim_msgs.msg import TrackedPersons
+from track_ped_msgs.msg import TrackedPersons
 from sensor_msgs.msg import LaserScan
 from scipy.interpolate import interp1d
 
@@ -47,7 +47,7 @@ class CnnData(Node):
         self.scan_sub = self.create_subscription(LaserScan, '/scan', self.scan_callback, 10)
         self.goal_sub = self.create_subscription(Point, '/cnn_goal', self.goal_callback, 10)
         self.vel_sub = self.create_subscription(Twist, '/mobile_base/commands/velocity', self.vel_callback, 10)
-        self.cnn_data_pub = self.create_publisher(CNN_data, '/cnn_data', 10)
+        self.cnn_data_pub = self.create_publisher(CnnData, '/cnn_data', 10)
 
         # Timer for controlling data publishing rate
         self.rate = LIDAR_FRAME_RATE  # 10 Hz
