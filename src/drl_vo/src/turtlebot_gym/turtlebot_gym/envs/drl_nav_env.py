@@ -946,5 +946,13 @@ class DRLNavEnv(Node):
             self._reset = True # Flag the environment for a reset after the episode end
             return True
         
+        # Condition 5: Check for excessive negative reward (penalizing bad behavior)
+        negative_reward_threshold = -50 
+        if reward <= negative_reward_threshold:
+            self._cmd_vel_pub.publish(Twist()) # Stop the robot by sending a zero velocity command
+            self._episode_done = True
+            self._reset = True
+            return True
+        
         # If none of the termination conditions are met, the episode continues
         return False # Return False indicating that the episode is still ongoing
