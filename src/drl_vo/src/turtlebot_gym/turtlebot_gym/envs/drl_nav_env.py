@@ -24,7 +24,6 @@ from action_msgs.msg import GoalStatusArray
 from track_ped_msgs.msg import TrackedPersons
 from cnn_msgs.msg import CnnData
 
-from scipy.interpolate import interp1d # For preprocessing the lidar data
 from scipy.optimize import linprog, minimize # For optimization 
 
 from rclpy.duration import Duration
@@ -889,6 +888,7 @@ class DRLNavEnv(Node):
         Determines whether the current episode should end based on several conditions:
         - The robot reaches the goal.
         - The robot collides with obstacles a certain number of times.
+        - The reward function returns a high negative value
         - The maximum number of iterations is exceeded.
 
         Args:
@@ -944,6 +944,14 @@ class DRLNavEnv(Node):
             self._episode_done = True  # Mark the episode as done
             self._reset = True  # Flag the environment for a reset after the episode end
             return True  # Return True indicating that the episode is finished
+        
+        # Condition 5: Check for excessive negative reward (penalizing bad behavior)
+        negative_reward_threshold = -50 
+        if reward <= negative_reward_threshold:
+            self._cmd_vel_pub.publish(Twist()) # Stop the robot by sending a zero velocity command
+            self._episode_done = True
+            self._reset = True
+            return True
 
         # If none of the termination conditions are met, the episode continues
         return False  # Return False indicating that the episode is still ongoing
