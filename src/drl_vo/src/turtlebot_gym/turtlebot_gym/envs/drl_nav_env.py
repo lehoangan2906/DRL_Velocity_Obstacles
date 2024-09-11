@@ -19,15 +19,13 @@ from gazebo_msgs.srv import GetModelState, SetModelState
 from nav_msgs.msg import Odometry, OccupancyGrid, Path
 from geometry_msgs.msg import Pose, Twist, Point, PoseStamped, PoseWithCovarianceStamped
 
-# from sensor_msgs.msg import LaserScan
+from sensor_msgs.msg import LaserScan
 from action_msgs.msg import GoalStatusArray
 from track_ped_msgs.msg import TrackedPersons
 from cnn_msgs.msg import CnnData
 
+from scipy.interpolate import interp1d # For preprocessing the lidar data
 from scipy.optimize import linprog, minimize # For optimization 
-
-from rclpy.duration import Duration
-from rclpy.exceptions import TimeoutException
 
 
 class DRLNavEnv(Node):
@@ -101,7 +99,7 @@ class DRLNavEnv(Node):
 
         # ROS 2 Subscriptions
         qos = QoSProfile(depth = 10, reliability=QoSReliabilityPolicy.RELIABLE)
-        # self._map_sub = self.create_subscription(OccupancyGrid, "/map", self._map_callback, qos)
+        self._map_sub = self.create_subscription(OccupancyGrid, "/map", self._map_callback, qos)
         self._cnn_data_sub = self.create_subscription(CnnData, "/cnn_data", self._cnn_data_callback, qos)
         self._robot_pos_sub = self.create_subscription(PoseStamped, "/robot_pose", self._robot_pose_callback, qos)
         self._robot_vel_sub = self.create_subscription(Odometry, '/odom', self._robot_vel_callback, qos)
@@ -220,23 +218,11 @@ class DRLNavEnv(Node):
         while obj.get_subscription_count() == 0:
             pass
     
-    def _check_service_ready(self, node, service_name, timeout=5.0):
-        """
-        Waits for a service to get ready in ROS2
-        """
-        self.get_logger().debug(f"Waiting for '{service_name}' to be READY...")
+    def _check_service_ready(self, name, timeout=5.0):
         try:
-            # Start counting time for the timeout
-            start_time = node.get_clock().now()
-            while (node.get_clock().now() - start_time) < Duration(seconds=timeout):
-                if node.get_service(service_name):
-                    self.get_logger().debug(f"Service '{service_name}' is READY.")
-                    return
-                rclpy.spin_once(node, timeout_sec=0.1)  # Short sleep to allow other processes
-
-            raise TimeoutException(f"Service '{service_name}' is not available after waiting for {timeout} seconds.")
-        except TimeoutException as e:
-            self.get_logger().fatal(f"Service '{service_name}' unavailable: {str(e)}")
+            self.gazebo_client.wait_for_service(timeout)
+        except rclpy.ServiceException:
+            pass
 
 
     # callback functions for ROS2
@@ -561,7 +547,10 @@ class DRLNavEnv(Node):
     def _get_observation(self):
         """
         Processes and normalizes sensor data (pedestrian positions, scan data, and goal position)
-        into a single observation vector.
+        into a single observation vector, with modifications fro the Oradar MS200 lidar specification.
+
+        - The Lidar data is split into 20-22 sefments.
+        - Interpolation is applied to handle non-uniform lidar data points.
 
         Returns:
             np.ndarray: A combined and normalized observation vector.
@@ -570,7 +559,7 @@ class DRLNavEnv(Node):
         # Extract the pedestrian positions from the cnn_data structure
         self.ped_pos = self.cnn_data.ped_pos_map
 
-        # Extract the preprocessed lidar scan data from the cnn_data structure (already interpolated in cnn_data_pub.py)
+        # Extract the lidar scan data from the cnn_data structure
         self.scan = self.cnn_data.scan
 
         # Extract the goal position from the cnn_data structure
@@ -579,39 +568,53 @@ class DRLNavEnv(Node):
         # Normalize the pedestrian position map (ped_pos) to the range [-1, 1]
         v_min = -2
         v_max = 2
-        self.ped_pos = np.array(self.ped_pos, dtype=np.float32)
+        self.ped_pos = np.array(self.ped_pos, dtype = np.float32)
         self.ped_pos = 2 * (self.ped_pos - v_min) / (v_max - v_min) + (-1)
 
-        # Process and split the lidar scan data into segments
-        fov = 360  # Field of View of the lidar
-        lidar_resolution_deg = 0.8  # Angular resolution of the Oradar MS200 lidar
-        num_lidar_points = int(fov / lidar_resolution_deg)  # Total number of lidar points
-        num_segments = 18  # Number of desired segments
-        segment_size = num_lidar_points // num_segments  # Number of points per segment
+        # Process and normalize the lidar scan data (Oradar MS200)
+        # Handling missing data (NaN or zero values) by interpolation
+        lidar_resolution_deg = 0.8 # Angular resolution of the Oradar MS200 lidar
+        fov = 360
+        num_lidar_points = int(fov / lidar_resolution_deg) # Total number of lidar points (theoretically)
+        num_segments = 18
+        segment_size = num_lidar_points // num_segments # Number of points per segment
 
-        # Convert the lidar data into segments
+        # Handle missing values (NaNs or zeros) using interpolation
+        lidar_data = np.array(self.scan, dtype=np.float32)
+        angles = np.linspace(0, fov, num=num_lidar_points, endpoint=False) # generate an array of equally spaced values between 0 and fov (not including fov)
+
+        # Replace zeros and NaNs with interpolated values
+        # Valid range: 0.03 to 12 meters
+        valid_mask = np.logical_and(lidar_data > 0.03, lidar_data <= 12) # return a boolean mask indicating whether the values satisfy the condition
+        
+        if not np.all(valid_mask): # check if all elements in the valid_mask array evaluate to True
+            # Interpolate the missing values (zeros or NaNs)
+            valid_angles = angles[valid_mask]
+            valid_data = lidar_data[valid_mask]
+            interpolation_function = interp1d(valid_angles, valid_data, kind='linear', fill_value="extrapolate") # takes in two arrays. Then perform linear interpolation and extrapolation
+            lidar_data = interpolation_function(angles)
+             
+        # Split the lidar data into 18 segments and compute the minimum and mean values
         scan_avg = np.zeros((2, num_segments))
         for n in range(num_segments):
-            segment_data = self.scan[n * segment_size: (n + 1) * segment_size]
-            scan_avg[0, n] = np.min(segment_data)  # Minimum value in the segment
-            scan_avg[1, n] = np.mean(segment_data)  # Mean value in the segment
+            segment_data = lidar_data[n * segment_size: (n + 1) * segment_size]
+            scan_avg[0, n] = np.min(segment_data) # Minimum value in the segment
+            scan_avg[1, n] = np.mean(segment_data) # Mean value in the segment
 
-        # Flatten the segmented lidar data for further processing
+        # Flatten the scan data for processing
         scan_avg_flat = scan_avg.flatten()
+        s_min = 0.03 # Minimum lidar range
+        s_max = 12.0 # Maximum lidar range
+        self.scan = 2 * (scan_avg_flat - s_min) / (s_max - s_min) + (-1) # Normalize to [-1, 1]
 
-        # Normalize the lidar scan data to the range [-1, 1]
-        s_min = 0.03  # Minimum lidar range
-        s_max = 12.0  # Maximum lidar range
-        self.scan = 2 * (scan_avg_flat - s_min) / (s_max - s_min) + (-1)
-
-        # Normalize the goal position to the range [-1, 1] to ensure all input data is on the same scale.
+        # Normalize the goal position to the range [-1, 1] to ensuere all input data is on the same scale.
         g_min = -2
         g_max = 2
         self.goal = np.array(self.goal, dtype=np.float32)
         self.goal = 2 * (self.goal - g_min) / (g_max - g_min) + (-1)
 
-        # Combine the normalized pedestrian positions, lidar scan data, and goal position into a single observation vector
-        self.observation = np.concatenate((self.ped_pos, self.scan, self.goal), axis=None)
+        # Combine the normalized pedestrian positions, scan data, and goal position into a single observation vector
+        self.observation = np.concatenate((self.ped_pos, self.scan, self.goal), axis = None)
 
         # Return the combined observation vector
         return self.observation
@@ -888,7 +891,6 @@ class DRLNavEnv(Node):
         Determines whether the current episode should end based on several conditions:
         - The robot reaches the goal.
         - The robot collides with obstacles a certain number of times.
-        - The reward function returns a high negative value
         - The maximum number of iterations is exceeded.
 
         Args:
@@ -901,57 +903,60 @@ class DRLNavEnv(Node):
         # Increment the number of iterations (i.e., time steps taken in the current episode)
         self.num_iterations += 1
 
-        # Calculate the Euclidean distance between the robot's current position and the goal position.
+        # Calculate the Euclidean distance between the robot's urrent position and the goal position.
         dist_to_goal = np.linalg.norm(
             np.array([
-                self.curr_pose.position.x - self.goal_position.x,  # Difference in x-coordinates
-                self.curr_pose.position.y - self.goal_position.y,  # Difference in y-coordinates
-                self.curr_pose.position.z - self.goal_position.z   # Difference in z-coordinates
+                self.curr_pose.position.x - self.goal_position.x, # Difference in x-coordinates
+                self.curr_pose.position.y - self.goal_position.y, # Difference in y-coordinates
+                self.curr_pose.position.z - self.goal_position.z # Difference in z-coordinates
             ])
         )
 
         # Condition 1: Check if the robot has reached the goal (within the defined goal radius)
         if dist_to_goal <= self.GOAL_RADIUS:
-            self._cmd_vel_pub.publish(Twist())  # Stop the robot by sending a zero velocity command
-            self._episode_done = True  # Mark the episode as done
-            return True  # Return True indicating that the episode is finished
-
-        # Fetch the latest scan data from the lidar (already preprocessed and interpolated in cnn_data_pub.py)
-        scan = self.cnn_data.scan[-450:]  # Use the last 450 scan points for front-facing analysis
-
-        # Condition 2: Check if the robot is colliding with an obstacle
-        min_scan_dist = np.amin(scan)  # Find the minimum distance in the scan data (preprocessed)
+            self._cmd_vel_pub.publish(Twist()) # Stop the robot by sending a zero velocity command
+            self._episode_done = True # Mark the episode as done
+            return True # Return True indicating that the episode is finished
         
-        # Ensure min_scan_dist falls within the lidar's valid range of [0.03, 12] meters (MS200 lidar range)
+        # Fetch the latest scan data (e.g., from the lidar) to check the proximity of obstacles
+        scan = self.cnn_data.scan[-450: ] # Use the last 450 scan points 
+
+        # Handle missing or zero values in the lidar data using interpolation
+        scan[scan == 0] = np.nan # Convert zero values (which indicate missing data) to NaN
+        valid_indices = np.where(~np.isnan(scan))[0] # Indices of valid (non-NaN) data
+        valid_scan = scan[valid_indices] # Extract valid scan data 
+
+        if len(valid_scan) < 2: # If there are too few valid points to interpolate, set default safe distance
+            min_scan_dist = 12.0 
+        else: 
+            # Interpolate missing values in the scan data
+            interp_func = interp1d(valid_indices, valid_scan, bounds_error=False, fill_value="extrapolate")
+            scan_filled = interp_func(np.arange(len(scan))) # Fill missing data with interpolation
+            min_scan_dist = np.amin(scan_filled) # Find the closest obstacle distance
+
+        # Ensure min_scan_dist falls within the lidar's valid range of [0.03, 12] meters
         min_scan_dist = np.clip(min_scan_dist, 0.03, 12.0)
 
+        # Condition 2: Check if the robot is colliding with an obstacle
         # If the robot is too close to an obstacle (distance <= robot_radius), increment the bump counter
-        if min_scan_dist <= self.ROBOT_RADIUS:
-            self.bump_num += 1  # Increment the bump counter if the robot is too close
+        if min_scan_dist <= self.ROBOT_RADIUS and min_scan_dist >= 0.03:
+            self.bump_num += 1 # Increment the bump counter if the robot is too close
 
         # Condition 3: If the robot has collided with obstacles more than 3 times, end the episode
         if self.bump_num >= 3:
-            self._cmd_vel_pub.publish(Twist())  # Stop the robot by sending a zero velocity command
-            self.bump_num = 0  # Reset the bump counter for the next episode
-            self._episode_done = True  # Mark the episode as done
-            self._reset = True  # Flag the environment for a reset after the episode end
-            return True  # Return True indicating that the episode is finished
-
-        # Condition 4: Check if the robot has exceeded the maximum number of allowed iterations
-        max_iteration = 512  # Set the maximum number of iterations allowed for one episode
-        if self.num_iterations > max_iteration:
-            self._cmd_vel_pub.publish(Twist())  # Stop the robot by sending a zero velocity command
-            self._episode_done = True  # Mark the episode as done
-            self._reset = True  # Flag the environment for a reset after the episode end
-            return True  # Return True indicating that the episode is finished
-        
-        # Condition 5: Check for excessive negative reward (penalizing bad behavior)
-        negative_reward_threshold = -50 
-        if reward <= negative_reward_threshold:
             self._cmd_vel_pub.publish(Twist()) # Stop the robot by sending a zero velocity command
-            self._episode_done = True
-            self._reset = True
+            self.bump_num = 0 # Reset the bump counter for the next episode
+            self._episode_done = True # Mark the episode as done
+            self._reset = True # Flag the environment for a reset after the episode end
+            return True # Return True indicating that the episode is finished
+        
+        # Condition 4: Check if the robot has exceeded the maximum number of allowed iteration
+        max_iteration = 512 # Set the maximum number of iterations allowed for one episode
+        if self.num_iterations > max_iteration:
+            self._cmd_vel_pub.publish(Twist()) # Stop the robot by sending a zero velocity command
+            self._episode_done = True # Mark the episode as done
+            self._reset = True # Flag the environment for a reset after the episode end
             return True
-
+        
         # If none of the termination conditions are met, the episode continues
-        return False  # Return False indicating that the episode is still ongoing
+        return False # Return False indicating that the episode is still ongoing
