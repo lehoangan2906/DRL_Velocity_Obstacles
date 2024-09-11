@@ -27,6 +27,9 @@ from cnn_msgs.msg import CnnData
 from scipy.interpolate import interp1d # For preprocessing the lidar data
 from scipy.optimize import linprog, minimize # For optimization 
 
+from rclpy.duration import Duration
+from rclpy.exceptions import TimeoutException
+
 
 class DRLNavEnv(Node):
     """
@@ -159,6 +162,46 @@ class DRLNavEnv(Node):
         self._set_init()
         return True
 
+    def _set_init(self):
+        """
+        Set initial condition for simulation
+        """
+        self._cmd_vel_pub.publish(Twist()) # Stop the robot by sending 0 velocity
+
+        if self._reset:
+            self._reset = False
+            self._check_all_systems_ready()
+
+            self.pos_valid_flag = False
+            map = self.map 
+
+            while not self.pos_valid_flag:
+                seed_initial_pose = random.randint(0, 18)
+                self._set_initial_pose(seed_initial_pose)
+                time.sleep(4)
+                x = self.curr_pose.position.x
+                y = self.curr_pose.position.y
+                radius = self.ROBOT_RADIUS
+                self.pos_valid_flag = self._is_pos_valid(x, y, radius, map)
+
+        goal_x, goal_y, goal_yaw = self._publish_random_goal()
+
+        time.sleep(1)
+        self._check_all_systems_ready()
+
+        self.init_pose = self.curr_pose
+        self.curr_pose = self.curr_pose
+        self.goal_position.x = goal_x
+        self.goal_position.y = goal_y
+
+        self.pos_valid_flag = True
+        self.bump_flag = False
+        self.num_iterations = 0
+        self.dist_to_goal_reg = np.zeros(self.DIST_NUM)
+        self._episode_done = False
+
+        return self.init_pose, self.goal_position
+    
     def _set_initial_pose(self, seed_initial_pose):
         # Set initial pose of the robot
 
@@ -218,104 +261,51 @@ class DRLNavEnv(Node):
         while obj.get_subscription_count() == 0:
             pass
     
-    def _check_service_ready(self, name, timeout=5.0):
+    def _check_service_ready(self, node, service_name, timeout=5.0):
+        """
+        Waits for a service to get ready in ROS2
+        """
+        self.get_logger().debug(f"Waiting for '{service_name}' to be READY...")
         try:
-            self.gazebo_client.wait_for_service(timeout)
-        except rclpy.ServiceException:
-            pass
+            # Start counting time for the timeout
+            start_time = node.get_clock().now()
+            while (node.get_clock().now() - start_time) < Duration(seconds=timeout):
+                if node.get_service(service_name):
+                    self.get_logger().debug(f"Service '{service_name}' is READY.")
+                    return
+                rclpy.spin_once(node, timeout_sec=0.1)  # Short sleep to allow other processes
+
+            raise TimeoutException(f"Service '{service_name}' is not available after waiting for {timeout} seconds.")
+        except TimeoutException as e:
+            self.get_logger().fatal(f"Service '{service_name}' unavailable: {str(e)}")
+
 
 
     # callback functions for ROS2
     # ========================================================================= #
 
-    
-    def _set_init(self):
-        """
-        Set initial condition for the simulation and robot, ensuring the robot is stopped, 
-        its initial position is set, and a valid goal is generated dynamically based on real-time sensor data.
-        """
+    def _map_callback(self, map_msg):
+        # Callback function to get the map
+        self.map = map_msg
 
-        # Stop the robot by sending a zero-velocity command (ensures it doesn't move during initialization).
-        self._cmd_vel_pub.publish(Twist())
-
-        if self._reset:
-            # Flag indicating whether the environment needs to be reset.
-            self._reset = False
-
-            # Ensure all systems (sensors, publishers, subscribers) are ready before proceeding.
-            self._check_all_systems_ready()
-
-            # Initialize a flag to track whether the initial position is valid.
-            self.pos_valid_flag = False
-
-            # Begin the process of setting the robot's initial position (no reliance on a global map).
-            while not self.pos_valid_flag:
-                # Randomly choose an initial pose from predefined seed values (or any custom logic).
-                seed_initial_pose = random.randint(0, 18)
-
-                # Set the robot's initial pose using the randomly selected seed.
-                self._set_initial_pose(seed_initial_pose)
-
-                # Wait for a short period to allow systems to update before checking position validity.
-                time.sleep(4)
-
-                # Obtain the current position of the robot from its pose (no map info used here).
-                x = self.curr_pose.position.x
-                y = self.curr_pose.position.y
-
-                # Define the radius for checking validity (based on the robot's physical size).
-                radius = self.ROBOT_RADIUS
-
-                # Validate whether the selected position is free of obstacles using sensor data (no global map).
-                self.pos_valid_flag = self._is_pos_valid(x, y, radius, scan_data=self.cnn_data.scan)
-
-        # Generate a random valid goal position using the dynamic goal generation method.
-        goal_x, goal_y, goal_yaw = self._publish_random_goal()
-
-        # Wait for a short period to ensure all systems are updated with the new goal.
-        time.sleep(1)
-
-        # Re-check that all systems are ready after the goal is set.
-        self._check_all_systems_ready()
-
-        # Store the current robot position as the initial position (for logging and tracking).
-        self.init_pose = self.curr_pose
-
-        # Update the current pose with the robot's present location.
-        self.curr_pose = self.curr_pose
-
-        # Store the generated goal position for further use during the episode.
-        self.goal_position.x = goal_x
-        self.goal_position.y = goal_y
-
-        # Set flags to indicate a valid starting state and reset various counters for the episode.
-        self.pos_valid_flag = True  # Mark that the initial position is valid.
-        self.bump_flag = False  # Reset the bump/collision flag.
-        self.num_iterations = 0  # Reset the number of iterations for this episode.
-        self.dist_to_goal_reg = np.zeros(self.DIST_NUM)  # Initialize the distance-to-goal tracking array.
-        self._episode_done = False  # Mark the episode as not yet complete.
-
-        # Return the initial pose and the generated goal position.
-        return self.init_pose, self.goal_position
-
-    # Callback function to get the CNN data
     def _cnn_data_callback(self, cnn_data_msg):
+        # callback function to get the CNN data
         self.cnn_data = cnn_data_msg
 
-    # callback function to get the robot pose
-    def _robot_pose_callback(self, robot_pose_msg):  
+    def _robot_pose_callback(self, robot_pose_msg):
+        # callback function to get the robot pose
         self.curr_pose = robot_pose_msg.pose
 
-    # callback function to get the robot velocity
     def _robot_vel_callback(self, robot_vel_msg):
+        # callback function to get the robot velocity
         self.curr_vel = robot_vel_msg.twist.twist
-    
-    # callback function to get the final goal
-    def _final_goal_callback(self, final_goal_msg): 
+
+    def _final_goal_callback(self, final_goal_msg):
+        # callback function to get the final goal
         self.goal_position = final_goal_msg.pose.position
 
-    # callback function to get the goal status (reached or not)
     def _goal_status_callback(self, goal_status_msg):
+        # callback function to get the goal status
         if len(goal_status_msg.status_list) > 0:
             last_element = goal_status_msg.status_list[-1]
             if last_element.status == 3:
@@ -325,8 +315,8 @@ class DRLNavEnv(Node):
         else:
             self._goal_reached = False
     
-    # callback function to get the pedestrian data
     def _ped_callback(self, trackPed_msg):
+        # callback function to get the pedestrian data
         self.mht_peds = trackPed_msg
 
 
@@ -389,113 +379,23 @@ class DRLNavEnv(Node):
         # Publish the initial pose message to the ROS topic that handles localization (e,g., for AMCL)
         self._initial_pose_pub.publish(initial_pose)
 
-    # Function to check if a position (x, y) is valid (free of obstacles) using Lidar sensor data
-    def _is_pos_valid(self, x, y, radius, scan_data):
+    # Function to randomly publish the goal position (x, y, theta) for the robot in the environment --> for global planner
+    def _publish_random_goal(self):
         """
-        Checks if the position (x, y) is valid, meaning it is free of obstacles based on real-time sensor data.
-
-        Args:
-            x (float): The x-coordinate of the position to check.
-            y (float): The y-coordinate of the position to check.
-            radius (float): The safety radius around the position to check for obstacle.
-            scan_data (np.array): Lidar scan data, containing distances to obstacles.
-
-        Returns:
-            bool: True if the position is valid (free of obstacles), False otherwise.
-        """
-
-        # Define the acceptable range of valid sensor data (for the MS200 Lidar)
-        lidar_min_range = 0.03 # Minimum range of the Lidar sensor
-        lidar_max_range = 12.0 # Maximum range of the Lidar sensor
-
-        # Calculate the distance from the robot's current position to the given (x, y)
-        dist_to_pos = np.linalg.norm([self.curr_pose.position.x - x, self.curr_pose.position.y - y])
-
-        # Check if the distance to the given position falls within the Lidar sensor's range
-        if dist_to_pos < lidar_min_range or dist_to_pos > lidar_max_range:
-            return False # The position is out of the sensor's range, so it is considered invalid
-        
-        # Loop through the lidar scan data (which represents distances to obstacles)
-        for scan_dist in scan_data:
-            # If any distance in the scan is less than the robot's radius, it indicates an obstacle nearby
-            if scan_dist <= radius:
-                return False # The position is considered invalid due to a nearby obstacle
-            
-        # If no obstacles are detected within the safety radius, the position is valid
-        return True
-
-    # Function to find a valid (free) random position (x, y, theta) within a specified area based on real-time sensor data
-    def _get_random_pos_on_map(self, scan_data):
-        """
-        Generates a random valid position (x, y) and orientation (theta) based on real-time sensor data.
-
-        Args: 
-            scan_data (np.array): Lidar scan data, containing distances to obstacles.
-
-        Returns:
-            tuple: A tuple (x, y, theta) representing a random valid position (x, y) and orientation (theta) in the environment.
-        """
-
-        # Define the bounds of the area for random position generation
-        # Can adjust the bounds depending on the size of our environment later on
-        x_min, x_max = -10, 10 # X-coordinate bounds (in meters)
-        y_min, y_max = -10, 10 # Y-coordinate bounds (in meters)
-
-        # Define a safe radius around the robot, combining the robot's own radius with an additional safety margin
-        radius = self.ROBOT_RADIUS + 0.5
-
-        # Loop until a valid position is found (i.e., the position is free of obstacles basef on lidar data)
-        valid_position = False
-
-        while not valid_position:
-            # Generate a random x-coordinate within the defined bounds
-            x = random.uniform(x_min, x_max)
-
-            # Generate a random y-coordinate within the defined bounds
-            y = random.uniform(y_min, y_max)
-
-            # Check if the position is valid (free of obstacles) based on the Lidar scan data
-            valid_position = self._is_pos_valid(x, y, radius, scan_data)
-
-        # Generate a random orientation angle (theta) between -pi and pi (the randomness help in the exploration process of the RL agent)
-        theta = random.uniform(-math.pi, math.pi)
-
-        # Return the valid random position and orientation as a tuple
-        return x, y, theta
-    
-    # Function to randomly publish the goal position (x, y, theta) for the robot based on real-time sensor data
-    def _publish_random_goal(self, scan_data):
-        """
-        Randomly selects a goal position (x, y, theta) in the environment for the robot,
+        The function randomly selects a goal position (x, y, theta) on the map for the robot, 
         ensuring that the goal is within a certain distance range from the robot's current position.
-        The goal is selected based on real-time sensor data to avoid obstacles.
-
-        Args:
-            scan_data (np.array): Lidar scan data, containing distances to obstacles.
-
-        Returns:
-            tuple: A tuple (x, y, theta) representing the goal position and orientation.
+        It then publishes this goal to be used by the robot's navigation system.
         """
 
-        # Initialize the distance difference to be outside the valid range
-        dis_diff = 21
-
-        # Loop until a valid goal position is found within the specified distance range
+        dis_diff = 21 
         while dis_diff >= 7 or dis_diff < 4.2:
-            # Generate a random goal position (x, y, theta) based on real-time sensor data
-            x, y, theta = self._get_random_pos_on_map(scan_data)
-
-            # Calculate the Euclidean distance between the robot's current position and the randomly selected goal
-            dis_diff = np.linalg.norm(
+            x, y, theta = self._get_random_pos_on_map(self.map)
+            dis_diff = np.linalg_norm(
                 np.array([self.curr_pose.position.x - x, self.curr_pose.position.y - y])
             )
-
-        # Once a valid goal position is found, publish it to the robot's navigation system
         self._publish_goal(x, y, theta)
-
-        # Return the goal position and orientation
         return x, y, theta
-
+    
     # Function to publish a goal position and orientation (x, y, theta) for the robot to navigate to
     def _publish_goal(self, x, y, theta):
         """
@@ -539,6 +439,93 @@ class DRLNavEnv(Node):
         # This triggers the navigation system to start planning a path to the specified goal
         self._initial_goal_pub.publish(goal)
 
+    # Function to find a valid (free) random position (x, y, theta) on the map 
+    # that the robot can potentially naviagate to
+    def _get_random_pos_on_map(self, map):
+        """
+        Generates a random valid position (x, y) and orientation (theta) on the map.
+
+        Args:
+            map (OccupancyGrid): The map data, which includes information about the map's dimentions, resolution,
+            and any obstacles.
+
+        Returns:
+            tuple: A tuple (x, y, theta) representing a random valid position (x, y) and orientation (theta) on the map.
+        """
+
+        # Calculate the total width of the map in the global coordinate system
+        map_width = map.info.width * map.info.resolution + map.info.origin.position.x
+
+        # Calculate the total height of the map in the global coordinate system
+        map_height = map.info.height * map.info.resolution + map.info.origin.position.y
+
+        # Generate a random x-coordinate within the map's width
+        x = random.uniform(0.0, map_width)
+
+        # Generate a random y-coordinate within the map's height
+        y = random.uniform(0.0, map_height)
+
+        # Define a sage radius around the robot, combining the robot's own radius with and additional safety margin
+        radius = self.ROBOT_RADIUS + 0.5
+
+        # Loop until a valid position is found (i.e., the position is free of obstacles)
+        while not self._is_pos_valid(x, y, radius, map):
+            # If the position is not valid, generate new random coordinates
+            x = random.uniform(0.0, map_width)
+            y = random.uniform(0.0, map_height)
+
+        # Generate a random orientation angle (theta) between -pi and pi
+        theta = random.uniform(-math.pi, math.pi)
+
+        # Return the valid random position and orientation as a tuple
+        return x, y, theta
+    
+    # Function to check if a position (x, y) is valid (free of obstacles) on the map
+    def _is_pos_valid(self, x, y, radius, map):
+        """
+        Checks if the position (x, y) is valid on the map, meaning it is free of obstacles and within bounds.
+
+        Args:
+            x (float): The x-coordinate of the position to check.
+            y (float): The y-coordinate of the position to check.
+            radius (float): The radius around the position to check for obstacles.
+            map (OccupancyGrid): The map data, which includes information about obstacles.
+
+        Returns:
+            bool: True if the position is valid (free of obstacles and within bounds), False otherwise
+        """
+
+        # Calculate the number of cells that correspond to the given safety radius
+        cell_radius = int(radius / map.info.resolution)
+
+        # Convert the global x, y coordinates to map grid indices
+        y_index = int((y - map.info.origin.position.y) / map.info.resolution)
+        x_index = int((x - map.info.origin.position.x) / map.info.resolution)
+
+        # Loop through the map cells within the square defined by the radius around the position
+        for i in range(x_index - cell_radius, x_index + cell_radius, 1):
+            for j in range(y_index - cell_radius, y_index + cell_radius, 1):
+                # Calculate the linear index of the cell in the map's data array
+                index = j * map.info.width + i
+
+                # Check if the index is within the bounds of the map data
+                if index >= len(map.data):
+                    return False # The index is out of bounds, so the position is invalid 
+                
+                try:
+                    # Get the value of the cell from the map's data
+                    val = map.data[index]
+                except IndexError:
+                    return False # An IndexError indicates and out-of-bounds access, so the position is invalid
+            
+                # Check if the cell is occupied by an obstacle (non-zero value means occupied )
+                if val != 0:
+                    return False # The cell is occupied, so the position is invalid
+                
+        
+        # If all cells in the checked area are free and within bounds, the position is valid
+        return True
+    
 
     # ========================================================================= #
     # Observation and action functions
@@ -661,19 +648,20 @@ class DRLNavEnv(Node):
     # ========================================================================= #
     # Reward computation
 
-    
     # compute goal reaching reward
     def _goal_reached_reward(self, r_arrival, r_waypoint):
-        # Computes the reward based on how close the robot is to the goal.
-        # It rewards the robot for reaching the goal or making progress towards it 
-        # and penalizes the robot if it fails to reach the goal within the allowed iterations.
+        """
+        Computes the reward based on how close the robot is to the goal.
+        It rewards the robot for reaching the goal or making progress towards it 
+        and penalizes the robot if it fails to reach the goal within the allowed iterations.
 
-        # Args:
-        #     r_arrival (float): Reward for reaching the goal.
-        #     r_waypoint (float): Reward for making progress towards the goal.
+        Args:
+            r_arrival (float): Reward for reaching the goal.
+            r_waypoint (float): Reward for making progress towards the goal.
 
-        # Returns:
-        #     float: The computed reward
+        Returns:
+            float: The computed reward
+        """
 
         # Calculate the Euclidean distance between the robot's current position and the goal position
         dist_to_goal = np.linalg.norm(
@@ -727,7 +715,7 @@ class DRLNavEnv(Node):
             float: The computed penalty based on proximity to obstacles.
         """
 
-        # Find the minimum distance from the lidar scan, ignoring zero values (which indicate no reading)
+        # Find the minimum distance from the lidar scan, ignoring zaro values (which indicate no reading)
         min_scan_dist = np.amin(scan[scan != 0])
 
         # Case 1: The robot is very close to an obstacle, potentially colliding (distance less than or equal to its radius)
