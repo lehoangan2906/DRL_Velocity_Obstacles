@@ -128,7 +128,7 @@ class CnnData(Node):
 
         # When enough data has been collected, publish the CNN data
         if self.ts_cnt >= NUM_TP:
-            cnn_data = CNN_data()
+            cnn_data = CnnData()
             cnn_data.ped_pos_map = [float(val) for sublist in self.ped_pos_map_tmp for subb in sublist for val in subb]
             cnn_data.scan = [float(val) for sublist in self.scan for val in sublist]
             cnn_data.scan_all = self.scan_all

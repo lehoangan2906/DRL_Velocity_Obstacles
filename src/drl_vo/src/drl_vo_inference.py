@@ -65,7 +65,7 @@ class DrlInference(Node):
 
         # Initialize ROS2 subscribers and publishers
         self.cnn_data_sub = self.create_subscription(
-            CNN_data, "/cnn_data", self.cnn_data_callback, qos_profile
+            CnnData, "/cnn_data", self.cnn_data_callback, qos_profile
         )   # Subscribe to the CNN data topic
 
         self.cmd_vel_pub = self.create_publisher(

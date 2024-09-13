@@ -62,7 +62,7 @@ class DRLNavEnv(Node):
         self.num_iterations = 0
 
         # Action limits
-        self.max_linear_speed = 0.5
+        self.max_linear_speed = 0.4
         self.max_angular_speed = 0.6
         
         # Action space
@@ -755,7 +755,6 @@ class DRLNavEnv(Node):
             reward = 0.0
         
         return reward
-
 
     # Reward for aligning with the goal
     def _theta_reward(self, goal, mht_peds, v_x, r_angle, angle_thresh):
