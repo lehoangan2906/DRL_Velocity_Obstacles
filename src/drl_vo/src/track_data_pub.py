@@ -72,7 +72,10 @@ app.prepare(ctx_id = 0, det_size = (640, 640))
 
 
 def find_Center(bbox):
-    pass
+    x1, y1, x2, y2 = bbox 
+    center_x = (x1 + x2) / 2
+    center_y = (y1 + y2) / 2
+    return [center_x, center_y]
 
 def calculate_iou_vectorized(faces_boxes, human_boxes):
     pass
@@ -496,6 +499,9 @@ class TrackPedPublisher(Node):
             # Use the source as the input path (for files or URLs)
             paths = [self.source]
             im0s = [cv2.imread(self.source)] # Replace with actual image loading logic for your source type 
+            if im0s[0] is None:
+                self.get_logger().error(f"Failed to load image from {self.source}")
+                return # Skip processing this frame if the image fails to load
 
         # Process faces if needed 
         faces_data = process_faces(im0s[0])
@@ -503,7 +509,7 @@ class TrackPedPublisher(Node):
         # Apply object detection
         p, im = process_detection(dt=None, im0s=im0s, paths=paths, model=self.model,
                                   device = self.device, imgsz=self.imgsz, save_dir=self.save_dir,
-                                  ig_seg=False, conf_thres=self.conf_thres, iou_thres=self.iou_thres,
+                                  is_seg=False, conf_thres=self.conf_thres, iou_thres=self.iou_thres,
                                   max_det=self.max_det, augment=False, visualize=False,
                                   classes=None, agnostic_nms=False)
         
@@ -535,8 +541,8 @@ class TrackPedPublisher(Node):
             tracked_person_msg.id = int(rs_dict['id'])
             tracked_person_msg.bbox_upper_left_x = rs_dict['bbox'][0]
             tracked_person_msg.bbox_upper_left_y = rs_dict['bbox'][1]
-            tracked_person_msg.bbox_lower_right_x = rs_dict['bbox'][2]
-            tracked_person_msg.bbox_lower_right_y = rs_dict['bbox'][3]
+            tracked_person_msg.bbox_bottom_right_x = rs_dict['bbox'][2]
+            tracked_person_msg.bbox_bottom_right_y = rs_dict['bbox'][3]
 
             # Assign depth and angle
             tracked_person_msg.depth = rs_dict['depth']
