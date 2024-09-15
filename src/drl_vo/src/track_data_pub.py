@@ -24,6 +24,7 @@ from find_distance import *
 from utils.milvus_tool import *
 from utils.process_box import *
 from insightface.app import FaceAnalysis
+from geometry_msgs.msg import Pose, Twist
 from insightface.data import get_image as ins_get_image
 
 
@@ -550,11 +551,28 @@ class TrackPedPublisher(Node):
 
             # Assign velocity if available
             if rs_dict['velocity']:
-                tracked_person_msg.velocity_x = rs_dict['velocity'][0]
-                tracked_person_msg.velocity_y = rs_dict['velocity'][1]
+                tracked_person_msg.twist.linear.x = rs_dict['velocity'][0] # velocity in x direction
+                tracked_person_msg.twist.linear.z = rs_dict['velocity'][1] # velocity in z direction
             else:
-                tracked_person_msg.velocity_x = 0.0
-                tracked_person_msg.velocity_y = 0.0
+                tracked_person_msg.twist.linear.x = 0.0
+                tracked_person_msg.twist.linera.z = 0.0
+
+            
+            # Calculate x and z coordinates of the pedestrian in the camera frame
+            real_x = rs_dict['depth'] * np.tan(rs_dict['angle']) # Calculate x using trigonometry
+            real_z = rs_dict['depth'] # z is the depth directly
+
+            # Fill in the pose with real-world coordinates
+            tracked_person_msg.pose = Pose()
+            tracked_person_msg.pose.position.x = real_x
+            tracked_person_msg.pose.position.y = 0.0
+            tracked_person_msg.pose.position.z = real_z
+
+            # Orientation can be set to default
+            tracked_person_msg.pose.orientation.x = 0.0
+            tracked_person_msg.pose.orientation.y = 0.0
+            tracked_person_msg.pose.orientation.z = 0.0
+            tracked_person_msg.pose.orientation.w = 1.0
             
             # Add individual tracked person to the list
             tracked_persons_msg.tracks.append(tracked_person_msg)

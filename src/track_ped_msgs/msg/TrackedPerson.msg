@@ -13,8 +13,8 @@ float32 depth
 # Angle relative to the camera's perpendicular bisector (in radians)
 float32 angle 
 
-# Pedestrian velocity in the X direction (m/s)
-float32 velocity_x
+# Pedestrian velocity
+geometry_msgs/Twist twist # Twist contains linear and angular velocity
 
-# Pedestrian velocity in the Z direction (m/s)
-float32 velocity_z
+# Real life coordinate of the pedestrian relative to the camera
+geometry_msgs/Pose pose 

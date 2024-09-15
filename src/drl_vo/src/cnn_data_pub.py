@@ -63,15 +63,15 @@ class CnnData(Node):
         if len(trackPed_msg.tracks) > 0:
             for ped in trackPed_msg.tracks:
                 x = ped.pose.pose.position.x
-                y = ped.pose.pose.position.y
+                z = ped.pose.pose.position.z
                 vx = ped.twist.twist.linear.x
-                vy = ped.twist.twist.linear.y
+                vz = ped.twist.twist.linear.z
 
                 # Only consider pedestrians within 20m x 20m region in front of the robot
                 if 0 <= x <= 20 and np.abs(y) <= 10:
                     # Convert the position into a 0.25m bin size grid (80x80 grid)
                     row = int(np.floor(x / 0.25))  # x-coordinate
-                    col = int(np.floor(-(y - 10) / 0.25))
+                    col = int(np.floor(-(z - 10) / 0.25)) # z-coordinate
 
                     # Ensure bins are within valid range
                     row = min(row, 79)
@@ -79,7 +79,7 @@ class CnnData(Node):
 
                     # Update velocity map with pedestrian's velocity
                     self.ped_pos_map_tmp[0, row, col] = vx  # velocity in x-direction
-                    self.ped_pos_map_tmp[1, row, col] = vy  # velocity in y-direction
+                    self.ped_pos_map_tmp[1, row, col] = vz  # velocity in z-direction
 
     # Callback function for lidar scan data
     def scan_callback(self, laserScan_msg):
