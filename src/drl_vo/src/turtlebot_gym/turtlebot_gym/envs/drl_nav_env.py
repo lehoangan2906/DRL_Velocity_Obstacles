@@ -16,7 +16,7 @@ import numpy as np
 from gym import spaces
 from rclpy.node import Node
 from gym.utils import seeding
-from cnn_msgs.msg import m
+from cnn_msgs.msg import CnnData
 from gazebo_msgs.msg import ModelState
 from action_msgs.msg import GoalStatusArray
 from track_ped_msgs.msg import TrackedPersons

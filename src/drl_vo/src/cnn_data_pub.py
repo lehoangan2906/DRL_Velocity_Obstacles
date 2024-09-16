@@ -56,6 +56,9 @@ class CnnData(Node):
         # Bridge to convert ROS images to OpenCV format
         self.bridge = CvBridge()
 
+        # Store the last 10 lidar scans for pooling
+        self.historical_scans = []
+
         # ROS2 subscriptions and publishers
         self.ped_sub = self.create_subscription(
             TrackedPersons, "/track_ped", self.ped_callback, 10
@@ -136,6 +139,15 @@ class CnnData(Node):
             # Update the scan with interpolated data
             scan_data = np.clip(interpolated_scan, 0, LIDAR_MAX_RANGE)
 
+        # Store the scan data
+        self.scan_all = scan_data
+
+        # Add to historical data (10 scans for 1 second)
+        if len(self.historical_scans) >= NUM_TP: 
+            self.historical_scans.pop(0) # Remove the oldest scan if it is about to exceeds 10 scans
+
+        self.historical_scans.append(scan_data) # Append the latest scan
+
         # Limit the data to the front-facing 180 degrees (combine two parts of the lidar array)
         front_facing_scan_part_1 = scan_data[
             FRONT_FACING_PART_1_START:FRONT_FACING_PART_1_END
@@ -150,6 +162,23 @@ class CnnData(Node):
         # Store the processed scan data
         self.scan_all = scan_data  # Store the full 360-degree scan
         self.scan_tmp = front_facing_scan  # Store the front-facing 180-degree scan
+
+    # Function to process the historical lidar data
+    def process_lidar_history(self):
+        # Apply min and average pooling across the 10 historical lidar scans
+        historical_data = np.array(self.historical_scans) # Shape: (10, num_lidar_beams)
+
+        # Compute minimum and average pooling
+        min_scan = np.min(historical_data, axis=0)
+        avg_scan = np.mean(historical_data, axis=0)
+
+        # Combine them into a single lidar map
+        lidar_map = (min_scan + avg_scan) / 2.0
+
+        # Reshape into 80 x 80 grid (assuming suitable mapping of lidar beams to grid)
+        lidar_map_grid = cv2.resize(lidar_map, (80, 80))
+
+        return lidar_map_grid
 
     # Callback function for goal position
     def goal_callback(self, goal_msg):
