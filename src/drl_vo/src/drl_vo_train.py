@@ -1,20 +1,22 @@
 #!/usr/bin/python3
 # This script is used to train the DRL-VO policy using the PPO algorithm.
 
-import rclpy
 import os
-import numpy as np
 import gym
+import rclpy
+import numpy as np
 import turtlebot_gym    # Custom gym environment
 from rclpy.node import Node
 from sensor_msgs.msg import Point  # Import Point for dynamic goal position
 from stable_baselines3 import PPO
+from custom_cnn_full import CustomCNN                   # Import custom CNN model
+from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv
 from stable_baselines3.common.env_checker import check_env
-from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.results_plotter import load_results, ts2xy
 from stable_baselines3.common.callbacks import BaseCallback
-from custom_cnn_full import CustomCNN  # Import custom CNN model
+from stable_baselines3.common.results_plotter import load_results, ts2xy
+
+
 
 class SaveOnBestTrainingRewardCallback(BaseCallback):
     """
@@ -104,11 +106,11 @@ class DRLVOTrain(Node):
 
         # Policy parameters for PPO - for continuing training with pre-trained model
         kwargs = {'tensorboard_log': log_dir,  # Directory for TensorBoard logs
-                 'verbose': 2,  # Verbosity level
-                 'n_epochs': 10,  # Number of epochs per update
-                 'n_steps': 512,  # Number of steps per environment per update
-                 'batch_size': 128,  # Minibatch size for each gradient update
-                 'learning_rate': 5e-5}  # Learning rate for the optimizer
+                'verbose': 2,  # Verbosity level
+                'n_epochs': 10,  # Number of epochs per update
+                'n_steps': 512,  # Number of steps per environment per update
+                'batch_size': 128,  # Minibatch size for each gradient update
+                'learning_rate': 5e-5}  # Learning rate for the optimizer
         
         # Continue training with pre-trained model
         # self.model = PPO.load(model_file, env=env, **kwargs)  # Load the pre-trained model with specified parameters

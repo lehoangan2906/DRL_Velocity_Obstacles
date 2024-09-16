@@ -3,17 +3,20 @@
 # Usage: This script is modified to be compatible with ROS2 and handle Oradar MS200 lidar data.
 # It processes pedestrian kinematic maps and lidar data, and publishes the processed data.
 
-import numpy as np
+import cv2
 import rclpy
+import numpy as np
 from rclpy.node import Node
+from cv_bridge import CvBridge
 from cnn_msgs.msg import CnnData
-from geometry_msgs.msg import Point, Twist
-from track_ped_msgs.msg import TrackedPersons
-from sensor_msgs.msg import LaserScan
 from scipy.interpolate import interp1d
+from geometry_msgs.msg import Point, Twist
+from sensor_msgs.msg import LaserScan, Image
+from track_ped_msgs.msg import TrackedPersons
+
 
 # Lidar specification
-LIDAR_FOV = 360 
+LIDAR_FOV = 360
 LIDAR_RESOLUTION = 0.8
 LIDAR_MIN_RANGE = 0.03
 LIDAR_MAX_RANGE = 12.0
@@ -22,32 +25,57 @@ LIDAR_FRAME_RATE = 10  # Frame rate of lidar scans in Hz
 
 # Front-facing lidar scan indices for 180-degree FOV (wrapping around 0 degrees)
 FRONT_FACING_PART_1_START = 337  # index corresponding to -90 degrees
-FRONT_FACING_PART_1_END = 450    # end of the lidar array (360 degrees)
-FRONT_FACING_PART_2_START = 0    # start of lidar array (0 degrees)
-FRONT_FACING_PART_2_END = 113    # index corresponding to +90 degrees
-NUM_FRONT_FACING_BEAMS = (FRONT_FACING_PART_1_END - FRONT_FACING_PART_1_START) + FRONT_FACING_PART_2_END
+FRONT_FACING_PART_1_END = 450  # end of the lidar array (360 degrees)
+FRONT_FACING_PART_2_START = 0  # start of lidar array (0 degrees)
+FRONT_FACING_PART_2_END = 113  # index corresponding to +90 degrees
+NUM_FRONT_FACING_BEAMS = (
+    FRONT_FACING_PART_1_END - FRONT_FACING_PART_1_START
+) + FRONT_FACING_PART_2_END
 
 # Time steps for collecting historical data
 NUM_TP = 10  # Number of timestamps for accumulating data
 NUM_PEDS = 34 + 1  # Number of total pedestrians
 
+
 class CnnData(Node):
     def __init__(self):
-        super().__init__('cnn_data_pub_node')
+        super().__init__("cnn_data_pub_node")
 
         # Initialize data for publishing
-        self.ped_pos_map = np.zeros((2, 80, 80))  # Cartesian velocity map for pedestrians
+        self.ped_pos_map = np.zeros(
+            (2, 80, 80)
+        )  # Cartesian velocity map for pedestrians
         self.scan = []  # Store processed lidar data for the front-facing 180-degree FOV
         self.scan_all = np.zeros(NUM_LIDAR_BEAMS)
         self.goal_cart = np.zeros(2)
         self.vel = np.zeros(2)
+        self.image_gray = []
+        self.depth = []
+        self.goal_final_polar = np.zeros(2)
+
+        # Bridge to convert ROS images to OpenCV format
+        self.bridge = CvBridge()
 
         # ROS2 subscriptions and publishers
-        self.ped_sub = self.create_subscription(TrackedPersons, '/track_ped', self.ped_callback, 10)
-        self.scan_sub = self.create_subscription(LaserScan, '/scan', self.scan_callback, 10)
-        self.goal_sub = self.create_subscription(Point, '/cnn_goal', self.goal_callback, 10)
-        self.vel_sub = self.create_subscription(Twist, '/mobile_base/commands/velocity', self.vel_callback, 10)
-        self.cnn_data_pub = self.create_publisher(CnnData, '/cnn_data', 10)
+        self.ped_sub = self.create_subscription(
+            TrackedPersons, "/track_ped", self.ped_callback, 10
+        )
+        self.scan_sub = self.create_subscription(
+            LaserScan, "/scan", self.scan_callback, 10
+        )
+        self.goal_sub = self.create_subscription(
+            Point, "/cnn_goal", self.goal_callback, 10
+        )
+        self.vel_sub = self.create_subscription(
+            Twist, "/mobile_base/commands/velocity", self.vel_callback, 10
+        )
+        self.depth_sub = self.create_subscription(
+            Image, "intel_realsense_d415_depth/depth/image_raw", self.depth_callback, 10
+        )
+        self.image_sub = self.create_subscription(
+            Image, "/intel_realsense_d415_depth/image_raw", self.image_callback, 10
+        )
+        self.cnn_data_pub = self.create_publisher(CnnData, "/cnn_data", 10)
 
         # Timer for controlling data publishing rate
         self.rate = LIDAR_FRAME_RATE  # 10 Hz
@@ -58,7 +86,7 @@ class CnnData(Node):
     def ped_callback(self, trackPed_msg):
         # Reset pedestrian velocity map at each callback
         self.ped_pos_map_tmp = np.zeros((2, 80, 80))  # Reset to clear old data
-        
+
         # Process pedestrian positions from TrackedPersons message
         if len(trackPed_msg.tracks) > 0:
             for ped in trackPed_msg.tracks:
@@ -68,10 +96,10 @@ class CnnData(Node):
                 vz = ped.twist.twist.linear.z
 
                 # Only consider pedestrians within 20m x 20m region in front of the robot
-                if 0 <= x <= 20 and np.abs(y) <= 10:
+                if 0 <= x <= 20 and np.abs(z) <= 10:
                     # Convert the position into a 0.25m bin size grid (80x80 grid)
                     row = int(np.floor(x / 0.25))  # x-coordinate
-                    col = int(np.floor(-(z - 10) / 0.25)) # z-coordinate
+                    col = int(np.floor(-(z - 10) / 0.25))  # z-coordinate
 
                     # Ensure bins are within valid range
                     row = min(row, 79)
@@ -85,8 +113,8 @@ class CnnData(Node):
     def scan_callback(self, laserScan_msg):
         # Extract lidar data and filter for valid points
         scan_data = np.array(laserScan_msg.ranges, dtype=np.float32)
-        scan_data[np.isnan(scan_data)] = 0.
-        scan_data[np.isinf(scan_data)] = 0.
+        scan_data[np.isnan(scan_data)] = 0.0
+        scan_data[np.isinf(scan_data)] = 0.0
 
         # Identify invalid values (zero means no reading) and perform interpolation
         valid_mask = (scan_data > LIDAR_MIN_RANGE) & (scan_data <= LIDAR_MAX_RANGE)
@@ -96,16 +124,28 @@ class CnnData(Node):
             valid_scan_data = scan_data[valid_mask]
 
             # Perform linear interpolation to replace missing data
-            interp_func = interp1d(valid_indices, valid_scan_data, kind='linear', bounds_error=False, fill_value='extrapolate')
+            interp_func = interp1d(
+                valid_indices,
+                valid_scan_data,
+                kind="linear",
+                bounds_error=False,
+                fill_value="extrapolate",
+            )
             interpolated_scan = interp_func(np.arange(len(scan_data)))
 
             # Update the scan with interpolated data
             scan_data = np.clip(interpolated_scan, 0, LIDAR_MAX_RANGE)
 
         # Limit the data to the front-facing 180 degrees (combine two parts of the lidar array)
-        front_facing_scan_part_1 = scan_data[FRONT_FACING_PART_1_START:FRONT_FACING_PART_1_END]
-        front_facing_scan_part_2 = scan_data[FRONT_FACING_PART_2_START:FRONT_FACING_PART_2_END]
-        front_facing_scan = np.concatenate((front_facing_scan_part_1, front_facing_scan_part_2))
+        front_facing_scan_part_1 = scan_data[
+            FRONT_FACING_PART_1_START:FRONT_FACING_PART_1_END
+        ]
+        front_facing_scan_part_2 = scan_data[
+            FRONT_FACING_PART_2_START:FRONT_FACING_PART_2_END
+        ]
+        front_facing_scan = np.concatenate(
+            (front_facing_scan_part_1, front_facing_scan_part_2)
+        )
 
         # Store the processed scan data
         self.scan_all = scan_data  # Store the full 360-degree scan
@@ -115,11 +155,28 @@ class CnnData(Node):
     def goal_callback(self, goal_msg):
         self.goal_cart[0] = goal_msg.x
         self.goal_cart[1] = goal_msg.y
+        # Convert to polar coordinates (for goal_final_polar)
+        self.goal_final_polar[0] = np.sqrt(
+            goal_msg.x**2 + goal_msg.y**2
+        )  # distance to goal
+        self.goal_final_polar[1] = np.arctan2(goal_msg.y, goal_msg.x)  # angle to goal
 
     # Callback function for velocity
     def vel_callback(self, vel_msg):
         self.vel[0] = vel_msg.linear.x  # linear velocity
         self.vel[1] = vel_msg.angular.z  # angular velocity
+
+    # Callback function for depth image
+    def depth_callback(self, depth_msg):
+        # Convert the depth image message to an OpenCV image
+        self.depth_image = self.bridge.imgmsg_to_cv2(
+            depth_msg, desired_encoding="passthrough"
+        )
+
+    # Callback function for grayscale image
+    def image_callback(self, image_msg):
+        # Convert the rgb image message to an OpenCV grayscale image
+        self.image_gray = self.bridge.imgmsg_to_cv2(image_msg, desired_encoding="mono8")
 
     # Timer callback to publish CNN data periodically
     def timer_callback(self):
@@ -129,11 +186,23 @@ class CnnData(Node):
         # When enough data has been collected, publish the CNN data
         if self.ts_cnt >= NUM_TP:
             cnn_data = CnnData()
-            cnn_data.ped_pos_map = [float(val) for sublist in self.ped_pos_map_tmp for subb in sublist for val in subb]
+            cnn_data.ped_pos_map = [
+                float(val)
+                for sublist in self.ped_pos_map_tmp
+                for subb in sublist
+                for val in subb
+            ]
             cnn_data.scan = [float(val) for sublist in self.scan for val in sublist]
             cnn_data.scan_all = self.scan_all
             cnn_data.goal_cart = self.goal_cart
+            cnn_data.goal_final_polar = self.goal_final_polar
             cnn_data.vel = self.vel
+            cnn_data.depth = (
+                self.depth_image.flatten().tolist()
+            )  # Flatten the depth image to a 1D list
+            cnn_data.image_gray = (
+                self.image_gray.flatten().tolist()
+            )  # Flatten the grayscale image to a 1D list
 
             # Publish the CNN data
             self.cnn_data_pub.publish(cnn_data)
@@ -141,6 +210,7 @@ class CnnData(Node):
             # Reset the scan history and time step counter
             self.ts_cnt = 0
             self.scan = []
+
 
 def main(args=None):
     rclpy.init(args=args)
@@ -154,5 +224,6 @@ def main(args=None):
         node.destroy_node()
         rclpy.shutdown()
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()

@@ -1,4 +1,12 @@
 #!/usr/bin/python3
+
+"""
+This module defines the DRLNavEnv class, which integrates ROS 2 and OpenAI Gym
+to create a reinforcement learning environment for navigation tasks using a
+TurtleBot.
+"""
+
+
 import gym
 import math
 import time
@@ -8,136 +16,197 @@ import numpy as np
 from gym import spaces
 from rclpy.node import Node
 from gym.utils import seeding
-from cnn_msgs.msg import CnnData
+from cnn_msgs.msg import m
 from gazebo_msgs.msg import ModelState
 from action_msgs.msg import GoalStatusArray
 from track_ped_msgs.msg import TrackedPersons
 from nav_msgs.msg import Odometry, OccupancyGrid
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
+from geometry_msgs.msg import PoseWithCovarianceStamped
 from gazebo_msgs.srv import GetModelState, SetModelState
-from geometry_msgs.msg import Pose, Twist, Point, PoseStamped, PoseWithCovarianceStamped
+from geometry_msgs.msg import Pose, Twist, Point, PoseStamped
 
 
 class DRLNavEnv(Node, gym.Env):
     """
-    Gazebo env converts standard openai gym methods into Gazebo commands
+    Gazebo environment that converts standard OpenAI Gym methods into Gazebo commands.
 
-    To check any topic we need to have the simulations running, we need to do two things:
-        1) Unpause the simulation: without that the stream of data doesn't flow. This is for simulations
-        that are paused for whatever reason.
-        2) If the simulation was running already for some reason, we need to reset the controllers.
-        This has to do with the fact that some plugins with tf, don't understand the reset of the simulation and need to be reset to work properly.
+
+    To check any topic we need to have the simulations running, we need to do
+    two things:
+
+        1) Unpause the simulation: without that the stream of data doesn't
+        flow. This is for simulations that are paused for whatever reason.
+
+        2) If the simulation was running already for some reason, we need to
+        reset the controllers. This has to do with the fact that some plugins
+        with tf, don't understand the reset of the simulation and need to be
+        reset to work properly.
     """
-
+    
+    # Set up the environment 
     def __init__(self):
+
+        # Initialize the ROS 2 system
         rclpy.init(args=None)
 
-        Node.__init__(self, 'drl_nav_env')
+        # Initialize the ROS2 node called 'drl_nav_env'
+        Node.__init__(self, "drl_nav_env")
+
+        # Initialize the OpenAI Gym environment
         gym.Env.__init__(self)
 
+        # Set a random seed for reproducibility
         self.seed()
 
         # Robot parameters:
-        self.ROBOT_RADIUS = 0.3
-        self.GOAL_RADIUS = 0.3
-        self.DIST_NUM = 10
-        self.pos_valid_flag = True
+        self.ROBOT_RADIUS = 0.3  # for collision checking
+        self.GOAL_RADIUS = (
+            0.3  # How close the robot must get to the goal to consider it reached
+        )
+        self.DIST_NUM = 10  # Number of distance measurements to track the robot's progress to the goal
+        self.pos_valid_flag = True  # Flag to check if the robot's position is valid (used for initialization)
 
-        # Bumper
-        self.bump_flag = False
-        self.bump_num = 0
+        # Define bumper-related flags
+        self.bump_flag = False  # if the robot bumped into something
+        self.bump_num = 0  # track the number of bumps
 
-        # Reward:
-        self.dist_to_goal_reg = np.zeros(self.DIST_NUM)
-        self.num_iterations = 0
+        # Reward related variables for RL:
+        self.dist_to_goal_reg = np.zeros(self.DIST_NUM)  # store distances to the goal
+        self.num_iterations = 0  # number of iterations (steps) in each episode
 
-        # Action limits
-        self.max_linear_speed = 0.4
-        self.max_angular_speed = 0.6
+        # Action limits for the robot
+        self.max_linear_speed = 0.4  # Maximum linear speed (m/sec)
+        self.max_angular_speed = 0.6  # Maximum angular speed (rad/sec)
 
-        # Action space
-        self.high_action = np.array([1, 1])
-        self.low_action = np.array([-1, -1])
+        # Action space: Normalized to [-1, 1]
+        self.high_action = np.array(
+            [1, 1]
+        )  # Upper bounds of the action space (linear and angular velocity)
+        self.low_action = np.array([-1, -1])  # Lower bounds of the action space
         self.action_space = spaces.Box(
-            low=self.low_action, high=self.high_action, dtype=np.float32)
+            low=self.low_action, high=self.high_action, dtype=np.float32
+        )  # possible actions that the agent can take. .
 
         # Observation space
-        self.cnn_data = CnnData()
-        self.ped_pos = []
-        self.scan = []
-        self.goal = []
+        self.cnn_data = CnnData()  # Placeholder for sensor data
+        self.ped_pos = []  # Placeholder for pedestrian positions
+        self.scan = []  # Placeholder for lidar data
+        self.goal = []  # Placeholder for goal position
         self.observation_space = spaces.Box(
-            low=-1, high=1, shape=(19202,), dtype=np.float32)
+            low=-1, high=1, shape=(19202,), dtype=np.float32
+        )  # Observation space size and range
 
-        # info, initial position and goal position
-        self.init_pose = Pose()
-        self.curr_pose = Pose()
-        self.curr_vel = Twist()
-        self.goal_position = Point()
-        self.info = {}
+        # initialize robot and environment information
+        self.init_pose = Pose()  # Initial pose of the robot
+        self.curr_pose = Pose()  # Current pose of the robot
+        self.curr_vel = Twist()  # Current velocity of the robot
+        self.goal_position = Point()  # Position of the goal
+        self.info = {}  # Additional information about the environment
 
-        # Episode done flag:
-        self._episode_done = False
+        # Episode control flags:
+        self._episode_done = False  # if the episode is done
+        self._goal_reached = False  # if the goal has been reached
+        self._reset = True  # reset the simulation at the beginning of an episode
 
-        # Goal reached flag:
-        self._goal_reached = False
+        # Pedestrian tracking related variable
+        self.peds = TrackedPersons()  # Tracks pedestrians in the environment
 
-        # Reset flag:
-        self._reset = True
-
-        # vo algorithm:
-        self.peds = TrackedPersons()
-
-        # Gazebo services
+        # ROS 2 service clients for interacting with Gazebo
         self.gazebo_client = self.create_client(
-            SetModelState, '/gazebo/set_model_state')
+            SetModelState,
+            "/gazebo/set_model_state",  # Set the robot's pose in the Gazebo simulation
+        )
         self.get_model_state = self.create_client(
-            GetModelState, '/gazebo/get_model_state')
+            GetModelState,
+            "/gazebo/get_model_state",  # Get the robot's current pose from Gazebo
+        )
 
-        # ROS 2 Subscriptions
+        # quality of service settings for subscribers and publishers
         qos = QoSProfile(depth=10, reliability=QoSReliabilityPolicy.RELIABLE)
+
+        # ROS 2 subsriptions and receiving data from topics
         self._map_sub = self.create_subscription(
-            OccupancyGrid, "/map", self._map_callback, qos)
+            OccupancyGrid,
+            "/map",
+            self._map_callback,
+            qos,  # Occupancy grid map of the environment
+        )
         self._cnn_data_sub = self.create_subscription(
-            CnnData, "/cnn_data", self._cnn_data_callback, qos)
+            CnnData,
+            "/cnn_data",
+            self._cnn_data_callback,
+            qos,  # sensor data and goal information
+        )
         self._robot_pos_sub = self.create_subscription(
-            PoseStamped, "/amcl_pose", self._robot_pose_callback, qos)
+            PoseStamped,
+            "/amcl_pose",
+            self._robot_pose_callback,
+            qos,  # Robot pose from the AMCL node (for localization)
+        )
         self._robot_vel_sub = self.create_subscription(
-            Odometry, '/odom', self._robot_vel_callback, qos)
+            Odometry, "/odom", self._robot_vel_callback, qos  # Odometry data
+        )
         self._final_goal_sub = self.create_subscription(
-            PoseStamped, "/move_base/current_goal", self._final_goal_callback, qos)
+            PoseStamped,
+            "/move_base/current_goal",
+            self._final_goal_callback,
+            qos,  # Goal position from the navigation stack
+        )
         self._goal_status_sub = self.create_subscription(
-            GoalStatusArray, "/move_base/status", self._goal_status_callback, qos)
+            GoalStatusArray,
+            "/move_base/status",
+            self._goal_status_callback,
+            qos,  # Goal reached status (success/failure) from the navigation stack
+        )
         self._ped_sub = self.create_subscription(
-            TrackedPersons, "/track_ped", self._ped_callback, qos)
+            TrackedPersons,
+            "/track_ped",
+            self._ped_callback,
+            qos,  # Pedestrian tracking data
+        )
 
         # ROS 2 Publishers
-        self._cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', qos)
-        self._initial_goal_pub = self.create_publisher(
-            PoseStamped, '/move_base_simple/goal', qos)
-        self._initial_pose_pub = self.create_publisher(
-            PoseWithCovarianceStamped, 'initialpose', qos)
+        self._cmd_vel_pub = self.create_publisher(
+            Twist, "/cmd_vel", qos
+        )  # Publish the robot's velocity (for controlling its movement)
 
-        # Ensure all system are ready
+        self._initial_goal_pub = self.create_publisher(
+            PoseStamped,
+            "/move_base_simple/goal",
+            qos,  # Publish the initial goal position for the navigation stack
+        )
+
+        self._initial_pose_pub = self.create_publisher(
+            PoseWithCovarianceStamped,
+            "initialpose",
+            qos,  # Publish the robot's initial pose to AMCL for localization
+        )
+
+        # Ensure all system (publishers, subscribers, services) are ready
         self._check_all_systems_ready()
 
+
+    # ========================================================================= #
     # Env methods
 
+    # Set the seed for the environment's random number generator
+    # Ensuring reproducibility of the environment
     def seed(self, seed=None):
         self.np_random, seed = seeding.np_random(seed)
         return [seed]
 
     # Interacting with the Gazebo simulation
-    def step(self, action):
+    def step(self, action):  # OpenAI Gym method
         """
-        Interacting with the Gazebo simulation 
+        Interacting with the Gazebo simulation
         - Taking action
         - Updating the environment
         - Return new state
         - Return reward
         - Return completion status
 
-        Gives env an action to enter the next state, 
+        Gives env an action to enter the next state,
         obs, reward, done, info = env.step(action)
         """
         self._take_action(action)
@@ -148,7 +217,7 @@ class DRLNavEnv(Node, gym.Env):
         return obs, reward, done, info
 
     # Resets the robot and the environment to a consistent initial state
-    def reset(self):
+    def reset(self):  # OpenAI Gym method
         """
         Resets the robot and the environment to a consistent initial state.
         - Resetting the robot's pose and goal position
@@ -163,7 +232,7 @@ class DRLNavEnv(Node, gym.Env):
         return obs
 
     # Safely shutdown the environment when it's no longer needed
-    def close(self):
+    def close(self):  # OpenAI Gym method
         """
         Function executed when closing the environment.
         Use it for closing GUIs and other systems that need closing
@@ -184,7 +253,7 @@ class DRLNavEnv(Node, gym.Env):
     def _set_init(self):
         """
         Set initial condition for simulation
-        - Resets the robot's velocity 
+        - Resets the robot's velocity
         - Checks if the robot's initial pose is valid (in a free space)
         - Publishes a random goal position.
         - Initializes internal variables that track the robot's state
@@ -201,7 +270,7 @@ class DRLNavEnv(Node, gym.Env):
             self._check_all_systems_ready()  # Ensure all systems are ready
 
             self.pos_valid_flag = False
-            map = self.map  # Get the map data
+            occ_map = self.occ_map  # Get the map data
 
             # Loop until a valid initial pose is found
             while not self.pos_valid_flag:
@@ -219,7 +288,8 @@ class DRLNavEnv(Node, gym.Env):
                 radius = self.ROBOT_RADIUS  # Get the robot's radius
 
                 self.pos_valid_flag = self._is_pos_valid(
-                    x, y, radius, map)  # Check if the initial pose is valid
+                    x, y, radius, occ_map
+                )  # Check if the initial pose is valid
 
         # Publish a random goal position for the robot to navigate to
         goal_x, goal_y, goal_yaw = self._publish_random_goal()
@@ -248,16 +318,29 @@ class DRLNavEnv(Node, gym.Env):
         # Set initial pose of the robot
 
         poses = [
-            [1, 1, 0], [14, 7, 1.5705], [1, 16, 0], [14, 22.5, -1.3113],
-            [4, 4, 1.5705], [2, 9, 0], [30, 9, 3.14], [25, 17, 3.14],
-            [5, 8, 0], [10, 12, 0], [14, 15, 1.576], [18.5, 15.7, 3.14],
-            [18.5, 11.3, 3.14], [14, 11.3, 3.14], [12.5, 13.2, 0.78],
-            [12.07, 16.06, 0], [21, 14, -1.576], [14,
-                                                  22.5, 1.576], [18, 8.5, -1.576]
+            [1, 1, 0],
+            [14, 7, 1.5705],
+            [1, 16, 0],
+            [14, 22.5, -1.3113],
+            [4, 4, 1.5705],
+            [2, 9, 0],
+            [30, 9, 3.14],
+            [25, 17, 3.14],
+            [5, 8, 0],
+            [10, 12, 0],
+            [14, 15, 1.576],
+            [18.5, 15.7, 3.14],
+            [18.5, 11.3, 3.14],
+            [14, 11.3, 3.14],
+            [12.5, 13.2, 0.78],
+            [12.07, 16.06, 0],
+            [21, 14, -1.576],
+            [14, 22.5, 1.576],
+            [18, 8.5, -1.576],
         ]
 
-        pose = poses[seed_initial_pose]         # Randomly select initial pose
-        self._pub_initial_model_state(*pose)   # Publish initial pose
+        pose = poses[seed_initial_pose]  # Randomly select initial pose
+        self._pub_initial_model_state(*pose)  # Publish initial pose
         time.sleep(1)
         self._pub_initial_position(*pose)
 
@@ -265,7 +348,7 @@ class DRLNavEnv(Node, gym.Env):
     def _check_all_systems_ready(self):
         self._check_all_subscribers_ready()  # Check if all subscribers are ready
         self._check_all_publishers_ready()  # Check if all publishers are ready
-        self._check_service_ready('/gazebo/set_model_state')
+        self._check_service_ready("/gazebo/set_model_state")
         return True
 
     # check if /map, /cnn_data, /amcl_pose, /move_base/status topic subscribers are ready
@@ -277,7 +360,8 @@ class DRLNavEnv(Node, gym.Env):
         self.get_logger().debug("START TO CHECK ALL SUBSCRIBERS READY")
 
         self._check_subscriber_ready(
-            "/map", OccupancyGrid)  # The occupancy grid map of the environment, which is used to determine free and occupied spaces.
+            "/map", OccupancyGrid
+        )  # The occupancy grid map of the environment, which is used to determine free and occupied spaces.
         # The data from the CNN module, which includes pedestrian positions, lidar scan data, and goal position.
         self._check_subscriber_ready("/cnn_data", CnnData)
         # The current pose of the robot in the environment. Generated by the AMCL localization system.
@@ -301,18 +385,20 @@ class DRLNavEnv(Node, gym.Env):
 
         var = None
 
-        self.get_logger().debug("Waiting for '{}' to be READY...".format(name))
+        self.get_logger().debug(f"Waiting for '{name}' to be READY...")
 
         # This loop keeps running until the topic becomes available (i.e., it starts publishing data)
         while var is None:
             try:
                 # This line waits for a message to be published on the specified topic
                 var = rclpy.wait_for_message(name, type, timeout)
-                self.get_logger().debug("Current '{}' READY=>".format(name))
+                self.get_logger().debug(f"Current '{name}' READY=>")
 
-            except:
+            except Exception:
                 # If the topic is not available, log a message and keep waiting
-                self.get_logger().debug("Sensor topic '{}' is not available, retrying...".format(name))
+                self.get_logger().debug(
+                    f"Sensor topic '{name}' is not available, retrying..."
+                )
 
         # Return the variable (message) received from the topic
         return var
@@ -320,23 +406,22 @@ class DRLNavEnv(Node, gym.Env):
     # check if /cmd_vel, /move_base_simple/goal, /initialpose topic publishers are ready and if /gazebo/set_model_state service is ready
     def _check_all_publishers_ready(self):
         """
-        Check if neccessary publishers and services are ready
+        Check if necessary publishers and services are ready
         """
 
         self.get_logger().debug("START TO CHECK ALL PUBLISHERS READY")
 
-        # Check if the publishers have acive subscribers
+        # Check if the publishers have active subscribers
         # Send velocity commands to the robot
-        self._check_publisher_ready('/cmd_vel', self._cmd_vel_pub)
+        self._check_publisher_ready("/cmd_vel", self._cmd_vel_pub)
         # Publish the initial goal position for the robot to the navigation stack
-        self._check_publisher_ready(
-            '/move_base_simple/goal', self._initial_goal_pub)
+        self._check_publisher_ready("/move_base_simple/goal", self._initial_goal_pub)
         # Publish the initial pose of the robot to the localization system (amcl)
-        self._check_publisher_ready('/initialpose', self._initial_pose_pub)
+        self._check_publisher_ready("/initialpose", self._initial_pose_pub)
 
         # Check if the Gazebo service is ready
         # Set the initial state of the robot in the Gazebo simulation
-        self._check_service_ready('/gazebo/set_model_state')
+        self._check_service_ready("/gazebo/set_model_state")
 
         self.get_logger().debug("ALL PUBLISHERS READY")
 
@@ -355,7 +440,8 @@ class DRLNavEnv(Node, gym.Env):
         while obj.get_subscription_count() == 0 and rclpy.ok():
             # Log a warning if no subscribers are connected
             self.get_logger().warn(
-                f"No subscribers found for publisher {name}. Retrying...")
+                f"No subscribers found for publisher {name}. Retrying..."
+            )
 
             # Sleep for a short duration to avoid a busy loop
             rclpy.sleep(1.0)
@@ -364,7 +450,8 @@ class DRLNavEnv(Node, gym.Env):
             elapsed_time = self.get_clock().now() - start_time
             if elapsed_time.nanoseconds / 1e9 > timeout:
                 self.get_logger().fatal(
-                    f"Publisher '{name}' is not available after waiting for {timeout} seconds.")
+                    f"Publisher '{name}' is not available after waiting for {timeout} seconds."
+                )
                 break
 
         self.get_logger().debug(f"Publisher '{name}' is READY.")
@@ -380,22 +467,21 @@ class DRLNavEnv(Node, gym.Env):
 
         # Try waiting for the service to become available
         try:
-            ready = self.wait_for_service(service_name, timeout_sec=timeout)
-            if ready:
+            if ready := self.wait_for_service(service_name, timeout_sec=timeout):
                 self.get_logger().debug(f"Service '{service_name}' is READY.")
             else:
                 self.get_logger().fatal(
-                    f"Service '{service_name}' is not available after waiting for {timeout} seconds.")
+                    f"Service '{service_name}' is not available after waiting for {timeout} seconds."
+                )
         except Exception as e:
-            self.get_logger().fatal(
-                f"Service '{service_name}' is not available: {e}")
+            self.get_logger().fatal(f"Service '{service_name}' is not available: {e}")
 
     # callback functions for ROS2
     # ========================================================================= #
 
     # callback function to get the occupancy grid map
     def _map_callback(self, map_msg):
-        self.map = map_msg
+        self.occ_map = map_msg
 
     # callback function to get the data of lidar, pedestrian, and goal position from the CNN module
     def _cnn_data_callback(self, cnn_data_msg):
@@ -463,7 +549,7 @@ class DRLNavEnv(Node, gym.Env):
         self.peds = trackPed_msg
 
     # ========================================================================= #
-    # Publisher functions for publishing informations about the robot and goal position
+    # Publisher functions for publishing information about the robot and goal position
 
     # Publish the new initial position (x, y, theta) of the robot in the Gazebo environment
     def _pub_initial_model_state(self, x, y, theta):
@@ -492,17 +578,17 @@ class DRLNavEnv(Node, gym.Env):
         robot_state.pose.orientation.x = 0  # No roll
         robot_state.pose.orientation.y = 0  # No pitch
         robot_state.pose.orientation.z = np.sin(
-            theta/2)    # Yaw converted to quaternion
-        robot_state.pose.orientation.w = np.cos(
-            theta/2)    # Quaternion w component
+            theta / 2
+        )  # Yaw converted to quaternion
+        robot_state.pose.orientation.w = np.cos(theta / 2)  # Quaternion w component
 
         # Set the reference frame for the robot, which is "world" in Gazebo
         robot_state.reference_frame = "world"
 
         # Attempt to call the Gazebo service to update the model's state
-        # This service request will plae the robot at the specified location in the Gazebo world
+        # This service request will place the robot at the specified location in the Gazebo world
         try:
-            # Call the Gzebo client to update the robot's state
+            # Call the Gazebo client to update the robot's state
             result = self.gazebo_client.call(robot_state)
         except rclpy.ServiceException:
             # If the Gazebo service fails (e.g., Gazebo is not available), handle the exception.
@@ -510,7 +596,7 @@ class DRLNavEnv(Node, gym.Env):
 
     # Function to publish the initial position of the robot (x, y, theta) in the environment --> for localization
     def _pub_initial_position(self, x, y, theta):
-        # Create a PoseWithCovarienaceStamped message to represent the robot's pose with uncertainty (covariance)
+        # Create a PoseWithCovarianceStamped message to represent the robot's pose with uncertainty (covariance)
         initial_pose = PoseWithCovarianceStamped()
 
         # Set the frame of reference for this pose to "map", which is commonly used in ROS2 for navigation
@@ -526,12 +612,13 @@ class DRLNavEnv(Node, gym.Env):
         initial_pose.pose.pose.position.z = 0
 
         # Convert the yaw angle (theta) to quaternion for setting the robot's orientation
-        initial_pose.pose.pose.orientation.x = 0    # No roll
-        initial_pose.pose.pose.orientation.y = 0    # No pitch
+        initial_pose.pose.pose.orientation.x = 0  # No roll
+        initial_pose.pose.pose.orientation.y = 0  # No pitch
         # Yaw converted to quaternion (z-axis rotation)
-        initial_pose.pose.pose.orientation.z = np.sin(theta/2)
+        initial_pose.pose.pose.orientation.z = np.sin(theta / 2)
         initial_pose.pose.pose.orientation.w = np.cos(
-            theta/2)  # Quaternion w component
+            theta / 2
+        )  # Quaternion w component
 
         # Publish the initial pose message to the ROS topic that handles localization (e,g., for AMCL)
         self._initial_pose_pub.publish(initial_pose)
@@ -539,7 +626,7 @@ class DRLNavEnv(Node, gym.Env):
     # Function to randomly publish the goal position (x, y, theta) for the robot in the environment --> for global planner
     def _publish_random_goal(self):
         """
-        The function randomly selects a goal position (x, y, theta) on the map for the robot, 
+        The function randomly selects a goal position (x, y, theta) on the map for the robot,
         ensuring that the goal is within a certain distance range from the robot's current position.
         It then publishes this goal to be used by the robot's navigation system.
         """
@@ -550,11 +637,10 @@ class DRLNavEnv(Node, gym.Env):
         while dis_diff >= 7 or dis_diff < 4.2:
             # if the distance is too short or too long, the loop continues generating new positions
             # Get a random position (x, y, theta) on the map
-            x, y, theta = self._get_random_pos_on_map(self.map)
+            x, y, theta = self._get_random_pos_on_map(self.occ_map)
 
             dis_diff = np.linalg_norm(
-                np.array([self.curr_pose.position.x - x,
-                         self.curr_pose.position.y - y])
+                np.array([self.curr_pose.position.x - x, self.curr_pose.position.y - y])
             )  # Calculate the Euclidean distance between the robot's current position and the randomly generated goal position
 
         # Publish the goal position for the robot to navigate to
@@ -592,29 +678,29 @@ class DRLNavEnv(Node, gym.Env):
         # Set the x, y, and z coordinates for the goal position
         goal.pose.position.x = x
         goal.pose.position.y = y
-        goal.pose.position.z = 0    # Assuming a 2D plane, so z is set to 0
+        goal.pose.position.z = 0  # Assuming a 2D plane, so z is set to 0
 
         # Convert the yaw angle (theta) into a quaternion for the robot's orientation at the goal
         # Quaternions are used in 3D space to avoid issues like gimbal lock
         goal.pose.orientation.x = 0  # No rotation around the x-axis
         goal.pose.orientation.y = 0  # No rotation around the y-axis
         # Rotation around the z-axis (yaw)
-        goal.pose.orientation.z = np.sin(goal_yaw/2)
+        goal.pose.orientation.z = np.sin(goal_yaw / 2)
         # Rotation component to complete the quaternion
-        goal.pose.orientation.w = np.cos(goal_yaw/2)
+        goal.pose.orientation.w = np.cos(goal_yaw / 2)
 
         # Publish the goal to the topic that the robot's navigation stack listens to
         # This triggers the navigation system to start planning a path to the specified goal
         self._initial_goal_pub.publish(goal)
 
     # Function to find a valid (free) random position (x, y, theta) on the map
-    # that the robot can potentially naviagate to
-    def _get_random_pos_on_map(self, map):
+    # that the robot can potentially navigates to
+    def _get_random_pos_on_map(self, occ_map):
         """
         Generates a random valid position (x, y) and orientation (theta) on the map.
 
         Args:
-            map (OccupancyGrid): The map data, which includes information about the map's dimentions, resolution,
+            occ_map (OccupancyGrid): The map data, which includes information about the map's dimentions, resolution,
             and any obstacles.
 
         Returns:
@@ -622,10 +708,16 @@ class DRLNavEnv(Node, gym.Env):
         """
 
         # Calculate the total width of the map in the global coordinate system
-        map_width = map.info.width * map.info.resolution + map.info.origin.position.x
+        map_width = (
+            occ_map.info.width * occ_map.info.resolution
+            + occ_map.info.origin.position.x
+        )
 
         # Calculate the total height of the map in the global coordinate system
-        map_height = map.info.height * map.info.resolution + map.info.origin.position.y
+        map_height = (
+            occ_map.info.height * occ_map.info.resolution
+            + occ_map.info.origin.position.y
+        )
 
         # Generate a random x-coordinate within the map's width
         x = random.uniform(0.0, map_width)
@@ -637,7 +729,7 @@ class DRLNavEnv(Node, gym.Env):
         radius = self.ROBOT_RADIUS + 0.5
 
         # Loop until a valid position is found (i.e., the position is free of obstacles)
-        while not self._is_pos_valid(x, y, radius, map):
+        while not self._is_pos_valid(x, y, radius, occ_map):
             # If the position is not valid, generate new random coordinates
             x = random.uniform(0.0, map_width)
             y = random.uniform(0.0, map_height)
@@ -649,7 +741,7 @@ class DRLNavEnv(Node, gym.Env):
         return x, y, theta
 
     # Function to check if a position (x, y) is valid (free of obstacles) on the map
-    def _is_pos_valid(self, x, y, radius, map):
+    def _is_pos_valid(self, x, y, radius, occ_map):
         """
         Checks if the position (x, y) is valid on the map, meaning it is free of obstacles and within bounds.
 
@@ -657,32 +749,34 @@ class DRLNavEnv(Node, gym.Env):
             x (float): The x-coordinate of the position to check.
             y (float): The y-coordinate of the position to check.
             radius (float): The radius around the position to check for obstacles.
-            map (OccupancyGrid): The map data, which includes information about obstacles.
+            occ_map (OccupancyGrid): The map data, which includes information about obstacles.
 
         Returns:
             bool: True if the position is valid (free of obstacles and within bounds), False otherwise
         """
 
         # Calculate the number of cells that correspond to the given safety radius
-        cell_radius = int(radius / map.info.resolution)
+        cell_radius = int(radius / occ_map.info.resolution)
 
         # Convert the global x, y coordinates to map grid indices
-        y_index = int((y - map.info.origin.position.y) / map.info.resolution)
-        x_index = int((x - map.info.origin.position.x) / map.info.resolution)
+        y_index = int((y - occ_map.info.origin.position.y) / occ_map.info.resolution)
+        x_index = int((x - occ_map.info.origin.position.x) / occ_map.info.resolution)
 
         # Loop through the map cells within the square defined by the radius around the position
         for i in range(x_index - cell_radius, x_index + cell_radius, 1):
             for j in range(y_index - cell_radius, y_index + cell_radius, 1):
                 # Calculate the linear index of the cell in the map's data array
-                index = j * map.info.width + i
+                index = j * occ_map.info.width + i
 
                 # Check if the index is within the bounds of the map data
-                if index >= len(map.data):
-                    return False  # The index is out of bounds, so the position is invalid
+                if index >= len(occ_map.data):
+                    return (
+                        False  # The index is out of bounds, so the position is invalid
+                    )
 
                 try:
                     # Get the value of the cell from the map's data
-                    val = map.data[index]
+                    val = occ_map.data[index]
                 except IndexError:
                     return False  # An IndexError indicates and out-of-bounds access, so the position is invalid
 
@@ -703,7 +797,7 @@ class DRLNavEnv(Node, gym.Env):
         Processes and normalizes sensor data (pedestrian positions, scan data, and goal position)
         into a single observation vector, with modifications fro the Oradar MS200 lidar specification.
 
-        - The Lidar data is split into 20-22 sefments.
+        - The Lidar data is split into 20-22 segments.
         - Interpolation is applied to handle non-uniform lidar data points.
 
         Returns:
@@ -740,7 +834,7 @@ class DRLNavEnv(Node, gym.Env):
         # Split the lidar data into 18 segments and compute the minimum and mean values
         scan_avg = np.zeros((2, num_segments))
         for n in range(num_segments):
-            segment_data = lidar_data[n * segment_size: (n + 1) * segment_size]
+            segment_data = lidar_data[n * segment_size : (n + 1) * segment_size]
             # Minimum value in the segment
             scan_avg[0, n] = np.min(segment_data)
             scan_avg[1, n] = np.mean(segment_data)  # Mean value in the segment
@@ -749,9 +843,11 @@ class DRLNavEnv(Node, gym.Env):
         scan_avg_flat = scan_avg.flatten()
         s_min = 0.03  # Minimum lidar range
         s_max = 12.0  # Maximum lidar range
-        self.scan = 2 * (scan_avg_flat - s_min) / (s_max - s_min) + (-1)  # Normalize to [-1, 1]
+        self.scan = 2 * (scan_avg_flat - s_min) / (s_max - s_min) + (
+            -1
+        )  # Normalize to [-1, 1]
 
-        # Normalize the goal position to the range [-1, 1] to ensuere all input data is on the same scale.
+        # Normalize the goal position to the range [-1, 1] to ensure all input data is on the same scale.
         g_min = -2
         g_max = 2
         self.goal = np.array(self.goal, dtype=np.float32)
@@ -759,7 +855,8 @@ class DRLNavEnv(Node, gym.Env):
 
         # Combine the normalized pedestrian positions, scan data, and goal position into a single observation vector
         self.observation = np.concatenate(
-            (self.ped_pos, self.scan, self.goal), axis=None)
+            (self.ped_pos, self.scan, self.goal), axis=None
+        )
 
         # Return the combined observation vector
         return self.observation
@@ -770,7 +867,7 @@ class DRLNavEnv(Node, gym.Env):
         self.info = {
             "initial_pose": self.init_pose,
             "goal_position": self.goal_position,
-            "current_pose": self.curr_pose
+            "current_pose": self.curr_pose,
         }
         return self.info
 
@@ -780,7 +877,7 @@ class DRLNavEnv(Node, gym.Env):
         Converts action values into linear and angular velocity commands and publishes them.
 
         Args:
-            action (list): A list where action[0] is the linear velocity control input 
+            action (list): A list where action[0] is the linear velocity control input
                         and action[1] is the angular velocity control input.
         """
         cmd_vel = Twist()  # Create a Twist message to store the velocity commands
@@ -810,7 +907,7 @@ class DRLNavEnv(Node, gym.Env):
     def _goal_reached_reward(self, r_arrival, r_waypoint):
         """
         Computes the reward based on how close the robot is to the goal.
-        It rewards the robot for reaching the goal or making progress towards it 
+        It rewards the robot for reaching the goal or making progress towards it
         and penalizes the robot if it fails to reach the goal within the allowed iterations.
 
         Args:
@@ -823,11 +920,16 @@ class DRLNavEnv(Node, gym.Env):
 
         # Calculate the Euclidean distance between the robot's current position and the goal position
         dist_to_goal = np.linalg.norm(
-            np.array([
-                self.curr_pose.position.x - self.goal_position.x,  # X-distance to goal
-                self.curr_pose.position.y - self.goal_position.y,  # Y-distance to goal
-                self.curr_pose.position.z - self.goal_position.z  # Z-distance to goal
-            ])
+            np.array(
+                [
+                    self.curr_pose.position.x
+                    - self.goal_position.x,  # X-distance to goal
+                    self.curr_pose.position.y
+                    - self.goal_position.y,  # Y-distance to goal
+                    self.curr_pose.position.z
+                    - self.goal_position.z,  # Z-distance to goal
+                ]
+            )
         )
 
         # Use modulo operation to track progress every DIST_NUM iterations
@@ -874,23 +976,21 @@ class DRLNavEnv(Node, gym.Env):
             float: The computed penalty based on proximity to obstacles.
         """
 
-        # Find the minimum distance from the lidar scan, ignoring zaro values (which indicate no reading)
+        # Find the minimum distance from the lidar scan, ignoring zero values (which indicate no reading)
         min_scan_dist = np.amin(scan[scan != 0])
 
         # Case 1: The robot is very close to an obstacle, potentially colliding (distance less than or equal to its radius)
         if min_scan_dist <= self.ROBOT_RADIUS and min_scan_dist >= 0.03:
-            reward = r_collision  # Apply a significant penalty for a collision
+            return r_collision  # Apply a significant penalty for a collision
 
         # Case 2: The robot is near an obstacle but not colliding (distance within 3 times its radius)
         elif min_scan_dist < 3 * self.ROBOT_RADIUS:
             # Apply a smaller penalty based on proximity
-            reward = r_scan * (3 * self.ROBOT_RADIUS - min_scan_dist)
+            return r_scan * (3 * self.ROBOT_RADIUS - min_scan_dist)
 
         # Case 3: The robot is far enough from obstacles (no penalty)
         else:
-            reward = 0.0
-
-        return reward
+            return 0.0
 
     # Punishment for high angular velocity (fast turns)
     def _angular_velocity_punish(self, w_z, r_rotation, w_thresh):
@@ -906,16 +1006,8 @@ class DRLNavEnv(Node, gym.Env):
             float: The computed penalty based on the angular velocity.
         """
 
-        # Case 1: If the angular velocity exceeds the threshold, apply a penalty
-        if abs(w_z) > w_thresh:
-            # Penalty increases with higher angular velocity
-            reward = abs(w_z) * r_rotation
-
-        # Case 2: If the angular velocity is within acceptable limits, no penalty is given
-        else:
-            reward = 0.0
-
-        return reward
+        #  Penalize the robot for excessive angular velocity (fast turns)
+        return abs(w_z) * r_rotation if abs(w_z) > w_thresh else 0.0
 
     # Reward for aligning with the goal
     def _theta_reward(self, goal, peds, v_x, r_angle, angle_thresh):
@@ -948,8 +1040,8 @@ class DRLNavEnv(Node, gym.Env):
             theta_min = 1000  # Large initial value for minimum angle difference
 
             # Sample random angles to find a safe direction to move
-            for i in range(N):
-                # Random ange in range [-pi, pi]
+            for _ in range(N):
+                # Random angle in range [-pi, pi]
                 theta = random.uniform(-np.pi, np.pi)
                 free = True  # Assume the angle is free from obstacles/pedestrians
 
@@ -968,14 +1060,19 @@ class DRLNavEnv(Node, gym.Env):
                         # Pedestrian's angle relative to the robot
                         ped_theta = np.arctan2(p_z, p_x)
                         vo_theta = np.arctan2(
-                            3 * self.ROBOT_RADIUS, np.sqrt(ped_dis ** 2 - (3 * self.ROBOT_RADIUS) ** 2))
+                            3 * self.ROBOT_RADIUS,
+                            np.sqrt(ped_dis**2 - (3 * self.ROBOT_RADIUS) ** 2),
+                        )
 
                         # Calculate the relative angle between the robot and pedestrian to avoid collision
                         theta_rp = np.arctan2(
-                            v_x * np.sin(theta) - p_vz, v_x * np.cos(theta) - p_vx)
+                            v_x * np.sin(theta) - p_vz, v_x * np.cos(theta) - p_vx
+                        )
 
                         # If the angle overlaps with the pedestrian's path (collision cone), mark as unsafe
-                        if theta_rp >= (ped_theta - vo_theta) and theta_rp <= (ped_theta + vo_theta):
+                        if theta_rp >= (ped_theta - vo_theta) and theta_rp <= (
+                            ped_theta + vo_theta
+                        ):
                             free = False
                             break
 
@@ -984,9 +1081,7 @@ class DRLNavEnv(Node, gym.Env):
             d_theta = theta_pre
 
         # Calculate the reward based on the angular difference from the goal direction
-        reward = r_angle * (angle_thresh - abs(d_theta))
-
-        return reward
+        return r_angle * (angle_thresh - abs(d_theta))
 
     # Aggregate reward computation
     def _compute_reward(self):
@@ -998,7 +1093,7 @@ class DRLNavEnv(Node, gym.Env):
         - Keeping a good heading angle toward the goal
 
         Returns:
-            float: The toal reward for the current action.
+            float: The total reward for the current action.
         """
 
         # Reward for reaching the goal
@@ -1011,7 +1106,9 @@ class DRLNavEnv(Node, gym.Env):
         r_scan = -0.2
 
         # Rewards related to the robot's angle and smooth turning
-        r_angle = 0.6  # Reward for maintaining the correct heading angle towards the goal
+        r_angle = (
+            0.6  # Reward for maintaining the correct heading angle towards the goal
+        )
         r_rotation = -0.1  # Penalty for excessive rotation (fast turns)
 
         # Thresholds for angular velocity and angle deviation
@@ -1023,20 +1120,21 @@ class DRLNavEnv(Node, gym.Env):
 
         # 2. Compute the penalty for collisions or being too close to obstacles
         r_c = self._obstacle_collision_punish(
-            self.cnn_data.scan[:450], r_scan, r_collision)
+            self.cnn_data.scan[:450], r_scan, r_collision
+        )
 
         # 3. Compute the penalty for high angular velocity (fast turns)
         r_w = self._angular_velocity_punish(
-            self.curr_vel.angular.z, r_rotation, w_thresh)
+            self.curr_vel.angular.z, r_rotation, w_thresh
+        )
 
         # 3. Compute the reward for aligning with the goal.
         r_t = self._theta_reward(
-            self.goal, self.peds, self.curr_vel.linear.x, r_angle, angle_thresh)
+            self.goal, self.peds, self.curr_vel.linear.x, r_angle, angle_thresh
+        )
 
         # Total reward is a sum of all components.
-        reward = r_g + r_c + r_t + r_w
-
-        return reward
+        return r_g + r_c + r_t + r_w
 
     # ========================================================================= #
     # Done flag computation
@@ -1059,13 +1157,18 @@ class DRLNavEnv(Node, gym.Env):
         # Increment the number of iterations (i.e., time steps taken in the current episode)
         self.num_iterations += 1
 
-        # Calculate the Euclidean distance between the robot's urrent position and the goal position.
+        # Calculate the Euclidean distance between the robot's current position and the goal position.
         dist_to_goal = np.linalg.norm(
-            np.array([
-                self.curr_pose.position.x - self.goal_position.x,  # Difference in x-coordinates
-                self.curr_pose.position.y - self.goal_position.y,  # Difference in y-coordinates
-                self.curr_pose.position.z - self.goal_position.z  # Difference in z-coordinates
-            ])
+            np.array(
+                [
+                    self.curr_pose.position.x
+                    - self.goal_position.x,  # Difference in x-coordinates
+                    self.curr_pose.position.y
+                    - self.goal_position.y,  # Difference in y-coordinates
+                    self.curr_pose.position.z
+                    - self.goal_position.z,  # Difference in z-coordinates
+                ]
+            )
         )
 
         # Condition 1: Check if the robot has reached the goal (within the defined goal radius)
@@ -1081,7 +1184,7 @@ class DRLNavEnv(Node, gym.Env):
         # Handle missing or zero values in the lidar data using interpolation
         # Convert zero values (which indicate missing data) to NaN
         scan[scan == 0] = np.nan
-        
+
         # Find the closest obstacle distance
         min_scan_dist = np.amin(scan)
 
@@ -1103,7 +1206,9 @@ class DRLNavEnv(Node, gym.Env):
             return True  # Return True indicating that the episode is finished
 
         # Condition 4: Check if the robot has exceeded the maximum number of allowed iteration
-        max_iteration = 512  # Set the maximum number of iterations allowed for one episode
+        max_iteration = (
+            512  # Set the maximum number of iterations allowed for one episode
+        )
         if self.num_iterations > max_iteration:
             # Stop the robot by sending a zero velocity command
             self._cmd_vel_pub.publish(Twist())
