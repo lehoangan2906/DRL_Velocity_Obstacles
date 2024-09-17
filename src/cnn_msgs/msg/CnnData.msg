@@ -3,6 +3,7 @@
 
 
 float32[] ped_pos_map		# pedestrian's position costmap in Cartesian coordinate: 2 channel, 20m * 20m, 80 x 80 grid
+float32[] lidar_map         # lidar map after preprocessing, 80x80 grid
 float32[] scan	  	# 225 range data from the laser scan
 float32[] scan_all	# 450 range data from the laser scan
 float32[] image_gray	        # image data from the intel realsense camera

@@ -1055,8 +1055,8 @@ class DRLNavEnv(Node, gym.Env):
                     # Calculate the distance to the pedestrian
                     ped_dis = np.linalg.norm([p_x, p_z])
 
-                    # If the pedestrian is within a 7m radius, check for collision potential
-                    if ped_dis <= 7:
+                    # If the pedestrian is within a 4m radius (in lidar range but slightly larger than depth cam range), check for collision potential
+                    if ped_dis <= 4:
                         # Pedestrian's angle relative to the robot
                         ped_theta = np.arctan2(p_z, p_x)
                         vo_theta = np.arctan2(
