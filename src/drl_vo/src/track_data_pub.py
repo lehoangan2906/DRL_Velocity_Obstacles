@@ -20,69 +20,143 @@ import pyrealsense2 as rs
 
 from time import time
 from pathlib import Path
-from find_distance import *
-from utils.milvus_tool import *
-from utils.process_box import *
-from insightface.app import FaceAnalysis
+from track_utils.find_distance import *
+from track_utils.utils.milvus_tool import *
+from track_utils.utils.process_box import *
+from track_utils.insightface.app import FaceAnalysis
 from geometry_msgs.msg import Pose, Twist
-from insightface.data import get_image as ins_get_image
+from track_utils.insightface.data import get_image as ins_get_image
 
 
-from ultralytics.utils.files import increment_path
-from ultralytics.data import load_inference_source
-from ultralytics.nn.autobackend import AutoBackend
-from trackers.multi_tracker_zoo import create_tracker
-from ultralytics.utils.torch_utils import select_device
-from ultralytics.data.augment import LetterBox, classify_transforms
-from ultralytics.utils.plotting import Annotator, colors, save_one_box
-from ultralytics.data.utils import FORMATS_HELP_MSG, IMG_FORMATS, VID_FORMATS
-from ultralytics.utils import DEFAULT_CFG, LOGGER, SETTINGS, callbacks, colorstr, ops
-from ultralytics.utils.checks import check_file, check_imgsz, check_imshow, print_args, check_requirements
-from ultralytics.utils.ops import Profile, non_max_suppression, scale_boxes, process_mask, process_mask_native
+from track_utils.ultralytics.ultralytics.utils.files import increment_path
+from track_utils.ultralytics.ultralytics.data import load_inference_source
+from track_utils.ultralytics.ultralytics.nn.autobackend import AutoBackend
+from track_utils.trackers.multi_tracker_zoo import create_tracker
+from track_utils.ultralytics.ultralytics.utils.torch_utils import select_device
+from track_utils.ultralytics.ultralytics.data.augment import (
+    LetterBox,
+    classify_transforms,
+)
+from track_utils.ultralytics.ultralytics.utils.plotting import (
+    Annotator,
+    colors,
+    save_one_box,
+)
+from track_utils.ultralytics.ultralytics.data.utils import (
+    FORMATS_HELP_MSG,
+    IMG_FORMATS,
+    VID_FORMATS,
+)
+from track_utils.ultralytics.ultralytics.utils import (
+    DEFAULT_CFG,
+    LOGGER,
+    SETTINGS,
+    callbacks,
+    colorstr,
+    ops,
+)
+from track_utils.ultralytics.ultralytics.utils.checks import (
+    check_file,
+    check_imgsz,
+    check_imshow,
+    print_args,
+    check_requirements,
+)
+from track_utils.ultralytics.ultralytics.utils.ops import (
+    Profile,
+    non_max_suppression,
+    scale_boxes,
+    process_mask,
+    process_mask_native,
+)
 
 
 # limit the number of cpus used by high performance libraries
-os.environ['OMP_NUM_THREADS'] = "1"
-os.environ['MKL_NUM_THREADS'] = "1"
-os.environ['NUMEXPR_NUM_THREADS'] = "1"
-os.environ['OPENBLAS_NUM_THREADS'] = "1"
-os.environ['VECLIB_MAXIMUM_THREADS'] = "1"
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
 
 
 FILE = Path(__file__).resolve()
-ROOT = FILE.parents[0]  # YOLOv5 strongsort root directory
-WEIGHTS = ROOT / 'weights'
+ROOT = FILE.parents[0]  # YOLOv8 strongsort root directory
+WEIGHTS = ROOT / "weights"
 
 
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))  # add ROOT to PATH
-if str(ROOT / 'ultralytics') not in sys.path:
-    sys.path.append(str(ROOT / 'ultralytics'))
-if str(ROOT / 'trackers' / 'strongsort') not in sys.path:
-    sys.path.append(str(ROOT / 'trackers' / 'strongsort')) 
+if str(ROOT / "ultralytics") not in sys.path:
+    sys.path.append(str(ROOT / "ultralytics"))
+if str(ROOT / "trackers" / "strongsort") not in sys.path:
+    sys.path.append(str(ROOT / "trackers" / "strongsort"))
 
 
-sys.path.append(str(FILE.parents[2])) # add strong_sort ROOT to PATH
+sys.path.append(str(FILE.parents[2]))  # add strong_sort ROOT to PATH
 sys.path.append(str(FILE.parents[1]))
 
 
-app = FaceAnalysis(providers = [('CUDAExecutionProvider')])
-app.prepare(ctx_id = 0, det_size = (640, 640))
+app = FaceAnalysis(providers=[("CUDAExecutionProvider")])
+app.prepare(ctx_id=0, det_size=(640, 640))
 
 ####################################################################################################
 
 
 def find_Center(bbox):
-    x1, y1, x2, y2 = bbox 
+    x1, y1, x2, y2 = bbox
     center_x = (x1 + x2) / 2
     center_y = (y1 + y2) / 2
     return [center_x, center_y]
 
-def calculate_iou_vectorized(faces_boxes, human_boxes):
-    pass
 
-def top_k_pred():
-    pass
+def calculate_iou_vectorized(A, B):
+    # Compute the intersection coordinates
+    x_left = np.maximum(A[:, None, 0], B[:, 0])
+    y_top = np.maximum(A[:, None, 1], B[:, 1])
+    x_right = np.minimum(A[:, None, 2], B[:, 2])
+    y_bottom = np.minimum(A[:, None, 3], B[:, 3])
+
+    # Compute intersection area
+    intersection_area = np.maximum(x_right - x_left, 0) * np.maximum(
+        y_bottom - y_top, 0
+    )
+
+    # Compute areas of bounding boxes
+    area_A = (A[:, 2] - A[:, 0]) * (A[:, 3] - A[:, 1])
+    area_B = (B[:, 2] - B[:, 0]) * (B[:, 3] - B[:, 1])
+
+    # Compute union area
+    union_area = (area_A[:, None] + area_B) - intersection_area
+
+    # Compute IoU
+    iou = intersection_area / union_area
+
+    return iou
+
+
+def top_k_pred(j, top_k, samples, results):
+    names = []
+    for i in range(top_k):
+        names.append(samples[results[j][i].id]["name"])
+        # names.append(samples['folder'][results[j][i].id])
+    check = {}
+    for name in names:
+        check[name] = names.count(name)
+    _max = 0.0
+    for key in check.keys():
+        if check[key] > _max:
+            _max = check[key]
+            out_name = key
+
+    score = []
+    cnt = 0
+    for i in range(top_k):
+        if samples[results[j][i].id]["name"] == out_name:
+            # distance = min(distance, float(results[j][i].distance)) #float(results[j][i].distance)
+            score.append(results[j][i].distance)
+            cnt += 1
+    return out_name, score[0], None  # samples['imagepath'][results[j][0].id]
+
 
 def process_faces(img):
     """
@@ -96,14 +170,16 @@ def process_faces(img):
     """
 
     # Face detection and embedding extraction
-    face_frame = img # Use the input image for face detection
-    faces = app.get(face_frame) # Detect faces in the image using InsightFace
+    face_frame = img  # Use the input image for face detection
+    faces = app.get(face_frame)  # Detect faces in the image using InsightFace
 
     # Create a DataFrame to store the bounding boxes of faces (x1, y1, x2, y2) and their embeddings
-    faces_data = pd.DataFrame([face.bbox for face in faces], columns = ['x1', 'y1', 'x2', 'y2'])
+    faces_data = pd.DataFrame(
+        [face.bbox for face in faces], columns=["x1", "y1", "x2", "y2"]
+    )
 
     # Normalize and add embeddings to the DataFrame
-    faces_data['embedding'] = [normalize(face.embedding) for face in faces]
+    faces_data["embedding"] = [normalize(face.embedding) for face in faces]
 
     return faces_data
 
@@ -119,18 +195,46 @@ def normalize(emb):
         np.ndarray: Normalized embedding vector.
     """
 
-    emb = np.squeeze(emb)  # Remove single-dimensional entries from the shape of the array
+    emb = np.squeeze(
+        emb
+    )  # Remove single-dimensional entries from the shape of the array
     norm = np.linalg.norm(emb)  # Compute the L2 norm of the embedding vector
-    return emb / norm   # Return the normalized embedding vector
+    return emb / norm  # Return the normalized embedding vector
 
 
-def process_tracking(p, dt, im0s, paths, curr_frames, prev_frames, tracker_list, outputs,
-                     faces_data, depth_frame, display_center, f_pixel, known_id,
-                     collection_name, samples, client, save_crop, line_thickness, 
-                     names, im, DEPTH_WIDTH, DEPTH_HEIGHT, save_vid, show_vid, 
-                     hide_labels, hide_conf, hide_class, windows, seen, 
-                     pre_velocities_cal, DELTA_T):
-    
+def process_tracking(
+    p,
+    dt,
+    im0s,
+    paths,
+    curr_frames,
+    prev_frames,
+    tracker_list,
+    outputs,
+    faces_data,
+    depth_frame,
+    display_center,
+    f_pixel,
+    known_id,
+    collection_name,
+    samples,
+    client,
+    save_crop,
+    line_thickness,
+    names,
+    im,
+    DEPTH_WIDTH,
+    DEPTH_HEIGHT,
+    save_vid,
+    show_vid,
+    hide_labels,
+    hide_conf,
+    hide_class,
+    windows,
+    seen,
+    pre_velocities_cal,
+    DELTA_T,
+):
     """
     Process object tracking for the detected objects using the tracker.
 
@@ -172,20 +276,22 @@ def process_tracking(p, dt, im0s, paths, curr_frames, prev_frames, tracker_list,
         curr_velocities_cal (pd.DataFrame): Current velocity calculations for the tracked objects.
     """
 
-    rs_dicts = [] # Array to store information about tracked objects
-    curr_velocities = [] # Array to store current velocities of objects
+    rs_dicts = []  # Array to store information about tracked objects
+    curr_velocities = []  # Array to store current velocities of objects
 
-    for i, det in enumerate(p): # Iterate through detections per image
+    for i, det in enumerate(p):  # Iterate through detections per image
         seen += 1
-        p, im0, _ = paths[i], im0s[i].copy(), 0 # Copy paths and original images
-        curr_frames[i] = im0 # Update current frame
+        p, im0, _ = paths[i], im0s[i].copy(), 0  # Copy paths and original images
+        curr_frames[i] = im0  # Update current frame
 
         # Prepare image for annotations
         imc = im0.copy() if save_crop else im0
-        annotator = Annotator(im0, line_width=line_thickness, example = str(names))
+        annotator = Annotator(im0, line_width=line_thickness, example=str(names))
 
         # Camera motion compensation, if required
-        if hasattr(tracker_list[i], 'tracker') and hasattr(tracker_list[i].tracker, 'camera_update'):
+        if hasattr(tracker_list[i], "tracker") and hasattr(
+            tracker_list[i].tracker, "camera_update"
+        ):
             if prev_frames[i] is not None and curr_frames[i] is not None:
                 tracker_list[i].tracker.camera_update(prev_frames[i], curr_frames[i])
 
@@ -201,12 +307,14 @@ def process_tracking(p, dt, im0s, paths, curr_frames, prev_frames, tracker_list,
             # If there are any tracking outputs
             if len(outputs[i]) > 0:
                 # Store detection results in a DataFrame
-                human_data = pd.DataFrame([output for output in outputs[i]],
-                                          columns=['x1', 'y1', 'x2', 'y2', 'ID', 'cls', 'conf'])
-                
+                human_data = pd.DataFrame(
+                    [output for output in outputs[i]],
+                    columns=["x1", "y1", "x2", "y2", "ID", "cls", "conf"],
+                )
+
                 # Calculate IoU between human boxes and face boxes
-                faces_boxes = faces_data[['x1', 'y1', 'x2', 'y2']].values
-                human_boxes = human_data[['x1', 'y1', 'x2', 'y2']].values
+                faces_boxes = faces_data[["x1", "y1", "x2", "y2"]].values
+                human_boxes = human_data[["x1", "y1", "x2", "y2"]].values
                 iou_matrix = calculate_iou_vectorized(faces_boxes, human_boxes)
 
                 # Find closes matches based on IoU
@@ -214,28 +322,30 @@ def process_tracking(p, dt, im0s, paths, curr_frames, prev_frames, tracker_list,
                 highest_ious = np.max(iou_matrix, axis=1)
 
                 # Assign embeddings to the tracked objects
-                human_data['embedding'] = None
+                human_data["embedding"] = None
                 for l, idx in enumerate(closest_B_indices):
-                    if highest_ious[l] > 0.5: # Assign only if the IoU is above a certain threshold
-                        human_data.at[idx, 'embedding'] = faces_data.at[l, 'embedding']
+                    if (
+                        highest_ious[l] > 0.5
+                    ):  # Assign only if the IoU is above a certain threshold
+                        human_data.at[idx, "embedding"] = faces_data.at[l, "embedding"]
 
                 # Iterate over tracking outputs and perform further calculations
                 for j, output in human_data.iterrows():
-                    bbox = output[['x1', 'y1', 'x2', 'y2']].tolist()
-                    id = output['ID']
-                    cls = output['cls']
-                    conf = output['conf']
+                    bbox = output[["x1", "y1", "x2", "y2"]].tolist()
+                    id = output["ID"]
+                    cls = output["cls"]
+                    conf = output["conf"]
 
                     # Handle embedding comparison using Milvus
-                    if output['embedding'] is not None:
-                        query_vectors = np.array([output['embedding']])
+                    if output["embedding"] is not None:
+                        query_vectors = np.array([output["embedding"]])
 
                         # Milvus query
                         param = {
-                            'collection_name': collection_name,
-                            'query_records': query_vectors,
-                            'top_k': 1,
-                            'params': {'nprobe': 16}
+                            "collection_name": collection_name,
+                            "query_records": query_vectors,
+                            "top_k": 1,
+                            "params": {"nprobe": 16},
                         }
                         status, results = client.search(**param)
 
@@ -243,7 +353,7 @@ def process_tracking(p, dt, im0s, paths, curr_frames, prev_frames, tracker_list,
                         th = 0.6
                         pred_name, score, ref = top_k_pred(0, 1, samples, results)
                         if score >= th:
-                            pass # Logic for matching to known identity
+                            pass  # Logic for matching to known identity
 
                     # Calculate bounding box center and depth/angle
                     center = find_Center(bbox)
@@ -251,41 +361,68 @@ def process_tracking(p, dt, im0s, paths, curr_frames, prev_frames, tracker_list,
                     center[1] = max(0, min(center[1], DEPTH_HEIGHT))
 
                     d = abs(center[0] - display_center)
-                    angle = np.arctan(d / f_pixel) # Calculate angle relative to camera
+                    angle = np.arctan(d / f_pixel)  # Calculate angle relative to camera
                     angle = angle if center[0] > display_center else -angle
 
-                    depth = depth_frame.get_distance(int(center[0]), int(center[1]))  # Get depth value
+                    depth = depth_frame.get_distance(
+                        int(center[0]), int(center[1])
+                    )  # Get depth value
                     real_x_position = depth * np.tan(angle)
 
                     # Calculate velocity if previous velocities are available
-                    if not pre_velocities_cal.empty and not pre_velocities_cal.loc[pre_velocities_cal['ID'] == id].empty:
-                        pre_velocity = pre_velocities_cal.loc[pre_velocities_cal['ID'] == id]
-                        velocity_x = (pre_velocity['Real_x_position'].values[0] - real_x_position) / DELTA_T
-                        velocity_y = (pre_velocity['Depth'].values[0] - depth) / DELTA_T
-                        rs_dict = {'id': id, 'bbox': bbox, 'depth': depth, 'angle': angle, 'velocity': [velocity_x, velocity_y]}
+                    if (
+                        not pre_velocities_cal.empty
+                        and not pre_velocities_cal.loc[
+                            pre_velocities_cal["ID"] == id
+                        ].empty
+                    ):
+                        pre_velocity = pre_velocities_cal.loc[
+                            pre_velocities_cal["ID"] == id
+                        ]
+                        velocity_x = (
+                            pre_velocity["Real_x_position"].values[0] - real_x_position
+                        ) / DELTA_T
+                        velocity_y = (pre_velocity["Depth"].values[0] - depth) / DELTA_T
+                        rs_dict = {
+                            "id": id,
+                            "bbox": bbox,
+                            "depth": depth,
+                            "angle": angle,
+                            "velocity": [velocity_x, velocity_y],
+                        }
                     else:
-                        rs_dict = {'id': id, 'bbox': bbox, 'depth': depth, 'angle': angle, 'velocity': None}
+                        rs_dict = {
+                            "id": id,
+                            "bbox": bbox,
+                            "depth": depth,
+                            "angle": angle,
+                            "velocity": None,
+                        }
 
-                    rs_dicts.append(rs_dict) # Append results to the list
+                    rs_dicts.append(rs_dict)  # Append results to the list
                     curr_velocities.append([id, real_x_position, depth])
 
             # Store current velocities
-            curr_velocities_cal = pd.DataFrame(curr_velocities, columns=['ID', 'Real_x_position', 'Depth'])
-        
+            curr_velocities_cal = pd.DataFrame(
+                curr_velocities, columns=["ID", "Real_x_position", "Depth"]
+            )
+
         else:
-            curr_velocities_cal = pd.DataFrame(columns=['ID', 'Real_x_position', 'Depth'])
+            curr_velocities_cal = pd.DataFrame(
+                columns=["ID", "Real_x_position", "Depth"]
+            )
 
         # Update the previous frames for motion compensation
         prev_frames[i] = curr_frames[i]
 
         # Display results
         if show_vid:
-            if platform.system() == 'Linux' and p not in windows:
+            if platform.system() == "Linux" and p not in windows:
                 windows.append(p)
                 cv2.namedWindow(str(p), cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
                 cv2.resizeWindow(str(p), im0.shape[1], im0.shape[0])
             cv2.imshow(str(p), im0)
-            if cv2.waitKey(1) == ord('q'):
+            if cv2.waitKey(1) == ord("q"):
                 exit()
 
     return rs_dicts, curr_velocities_cal
@@ -314,7 +451,23 @@ def pre_transform(im, imgsz, model):
     return [letterbox(image=x) for x in im]
 
 
-def process_detection(dt, im0s, paths, model, device, imgsz, save_dir, is_seg, conf_thres, iou_thres, max_det, augment, visualize, classes, agnostic_nms):
+def process_detection(
+    dt,
+    im0s,
+    paths,
+    model,
+    device,
+    imgsz,
+    save_dir,
+    is_seg,
+    conf_thres,
+    iou_thres,
+    max_det,
+    augment,
+    visualize,
+    classes,
+    agnostic_nms,
+):
     """
     Process the images for object detection using the YOLOv5 model.
 
@@ -339,29 +492,35 @@ def process_detection(dt, im0s, paths, model, device, imgsz, save_dir, is_seg, c
         p (list): Processed detections for each image.
         im (torch.Tensor): Preprocessed image tensor ready for model inference.
     """
-    
-    with dt[0]: # Preprocessing
+
+    with dt[0]:  # Preprocessing
         # Check if the input is not already a torch Tensor
         not_tensor = not isinstance(im0s, torch.Tensor)
 
         if not_tensor:
             # Apply pre-transformation
             im = np.stack(pre_transform(im0s, imgsz, model))
-            im = im[..., ::-1].transpose((0, 3, 1, 2)) # Convert BGR to RGB, BHWC to BCHW, (n, 3, h, w)
-            im=np.ascontigousarray(im) # Ensure memory is contiguous
-            im = torch.from_numpy(im) # Convert Numpy array to a Pytorch tensor
+            im = im[..., ::-1].transpose(
+                (0, 3, 1, 2)
+            )  # Convert BGR to RGB, BHWC to BCHW, (n, 3, h, w)
+            im = np.ascontigousarray(im)  # Ensure memory is contiguous
+            im = torch.from_numpy(im)  # Convert Numpy array to a Pytorch tensor
 
-            im = im.to(device) # Move the tensor to the specified device (CPU or GPU)
-            im = im.half() if model.fp16 else im.float() # Convert to FP16 or FP32 depending on model settings
+            im = im.to(device)  # Move the tensor to the specified device (CPU or GPU)
+            im = (
+                im.half() if model.fp16 else im.float()
+            )  # Convert to FP16 or FP32 depending on model settings
             if not_tensor:
-                im /= 255 # Normalize to [0.0, 1.0] if the input is not already a tensor
-            
+                im /= (
+                    255  # Normalize to [0.0, 1.0] if the input is not already a tensor
+                )
+
     # Inference
     with dt[1]:
         # If visualization is enabled, create the save directory
         visualize = (
             increment_path(save_dir / Path(paths).stem, mkdir=True)
-            if visualize # And (not source_type.tensor)
+            if visualize  # And (not source_type.tensor)
             else False
         )
         # Perform inference using the model
@@ -372,63 +531,161 @@ def process_detection(dt, im0s, paths, model, device, imgsz, save_dir, is_seg, c
         if is_seg:
             # For segmentation, handle masks
             masks = []
-            p = non_max_suppression(preds[0], conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det, nm=32)
+            p = non_max_suppression(
+                preds[0],
+                conf_thres,
+                iou_thres,
+                classes,
+                agnostic_nms,
+                max_det=max_det,
+                nm=32,
+            )
             proto = preds[1][-1]
         else:
             # Standard NMS without segmentation
-            p = non_max_suppression(preds, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det)
+            p = non_max_suppression(
+                preds, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det
+            )
 
     return p, im
 
 
 def init_Milvus():
-    pass
+    client = Milvus(uri="tcp://localhost:19530")
+    # client = Milvus(uri='tcp://172.21.100.254:19530')
+    client.list_collections()
+
+    client.drop_collection("data")
+
+    # Create collection demo_collection if it dosen't exist.
+    collection_name = "data"
+
+    status, ok = client.has_collection(collection_name)
+    if not ok:
+        param = {
+            "collection_name": collection_name,
+            "dimension": 512,
+            "metric_type": MetricType.IP,  # optional
+        }
+    client.create_collection(param)
+
+    _, collection = client.get_collection_info(collection_name)
+    print("Collection: ", collection)
+    status, result = client.count_entities(collection_name)
+    print("Result: ", result)
+
+    pkl_path = "../sample_huy.pkl"
+    with open(pkl_path, "rb") as f:
+        samples = pickle.load(f)
+    names = [sample["name"] for sample in samples]
+    names = set(names)
+
+    # embs = np.array([np.array(i['emb']) for i in samples])
+    embs = np.array([sample["emb"] for sample in samples])
+    print(len(embs))
+    print(len(samples))
+    # %% convert list to numpy array
+    knownEmbedding = embs
+    print(knownEmbedding.shape)
+
+    # knownNamesId = [i['name'] for i in samples]
+    knownNamesId = [sample["name"] for sample in samples]
+    print("len Ids: ", len(knownNamesId))
+    print("len Embs: ", knownEmbedding.shape[0])
+    # insert true data into true_collection_
+    status, ids = client.insert(
+        collection_name=collection_name,
+        records=knownEmbedding,
+        ids=list(range(len(knownNamesId))),
+    )
+    if not status.OK():
+        print("Insert failed: {}".format(status))
+    print(len(ids))
+    print("Status: ", status)
+    # %%
+    client.flush([collection_name])
+    # Get demo_collection row count
+    status, result = client.count_entities(collection_name)
+    print(result)
+    print(status)
+    ivf_param = {"nlist": 1024}
+    status = client.create_index(collection_name, IndexType.FLAT, ivf_param)
+
+    # describe index, get information of index
+    status, index = client.get_index_info(collection_name)
+
+    return client, collection_name, samples
+
 
 class TrackPedPublisher(Node):
     def __init__(self):
-        super().__init__('track_ped_publisher')
+        super().__init__("track_ped_publisher")
 
         # Publisher for TrackedPersons (list of tracked objects)
-        self.publisher_tracked_persons = self.create_publisher(TrackedPersons, '/track_ped', 10)
+        self.publisher_tracked_persons = self.create_publisher(
+            TrackedPersons, "/track_ped", 10
+        )
 
         # Publisher for individual TrackedPerson
-        self.publisher_tracked_person = self.create_publisher(TrackedPerson, '/track_ped_person', 10)
+        self.publisher_tracked_person = self.create_publisher(
+            TrackedPerson, "/track_ped_person", 10
+        )
 
         # Timer for calling the tracking callback at 30 FPS
         self.timer = self.create_timer(1.0 / 30, self.timer_callback)
 
         # Declare ROS2 parameters (can be configured via launch file or parameter server)
-        self.declare_parameter('source', '0')  # Default to '0' (webcam/RealSense)
-        self.declare_parameter('yolo_weights', str(WEIGHTS / 'yolov5m.pt'))
-        self.declare_parameter('reid_weights', str(WEIGHTS / 'osnet_x0_25_msmt17.pt'))
-        self.declare_parameter('tracking_method', 'strongsort')
-        self.declare_parameter('conf_thres', 0.25)
-        self.declare_parameter('iou_thres', 0.45)
-        self.declare_parameter('max_det', 1000)
-        self.declare_parameter('show_vid', False)
-        self.declare_parameter('save_vid', False)
-        self.declare_parameter('device', '')
+        self.declare_parameter("source", "0")  # Default to '0' (webcam/RealSense)
+        self.declare_parameter("yolo_weights", str(WEIGHTS / "yolov5m.pt"))
+        self.declare_parameter("reid_weights", str(WEIGHTS / "osnet_x0_25_msmt17.pt"))
+        self.declare_parameter("tracking_method", "strongsort")
+        self.declare_parameter("conf_thres", 0.25)
+        self.declare_parameter("iou_thres", 0.45)
+        self.declare_parameter("max_det", 1000)
+        self.declare_parameter("show_vid", False)
+        self.declare_parameter("save_vid", False)
+        self.declare_parameter("device", "")
 
         # Get parameters from ROS2
-        self.source = self.get_parameter('source').get_parameter_value().string_value
-        self.yolo_weights = self.get_parameter('yolo_weights').get_parameter_value().string_value
-        self.reid_weights = self.get_parameter('reid_weights').get_parameter_value().string_value
-        self.tracking_method = self.get_parameter('tracking_method').get_parameter_value().string_value
-        self.conf_thres = self.get_parameter('conf_thres').get_parameter_value().double_value
-        self.iou_thres = self.get_parameter('iou_thres').get_parameter_value().double_value
-        self.max_det = self.get_parameter('max_det').get_parameter_value().integer_value
-        self.show_vid = self.get_parameter('show_vid').get_parameter_value().bool_value
-        self.save_vid = self.get_parameter('save_vid').get_parameter_value().bool_value
-        self.device = self.get_parameter('device').get_parameter_value().string_value
+        self.source = self.get_parameter("source").get_parameter_value().string_value
+        self.yolo_weights = (
+            self.get_parameter("yolo_weights").get_parameter_value().string_value
+        )
+        self.reid_weights = (
+            self.get_parameter("reid_weights").get_parameter_value().string_value
+        )
+        self.tracking_method = (
+            self.get_parameter("tracking_method").get_parameter_value().string_value
+        )
+        self.conf_thres = (
+            self.get_parameter("conf_thres").get_parameter_value().double_value
+        )
+        self.iou_thres = (
+            self.get_parameter("iou_thres").get_parameter_value().double_value
+        )
+        self.max_det = self.get_parameter("max_det").get_parameter_value().integer_value
+        self.show_vid = self.get_parameter("show_vid").get_parameter_value().bool_value
+        self.save_vid = self.get_parameter("save_vid").get_parameter_value().bool_value
+        self.device = self.get_parameter("device").get_parameter_value().string_value
 
         # Handle the input source logic
         self.source = str(self.source)  # Ensure source is a string
-        self.is_file = Path(self.source).suffix[1:] in (VID_FORMATS)  # Check if it's a file
-        self.is_url = self.source.lower().startswith(('rtsp://', 'rtmp://', 'http://', 'https://'))
-        self.webcam = self.source.isnumeric() or self.source.endswith('.txt') or (self.is_url and not self.is_file)
-        
+        self.is_file = Path(self.source).suffix[1:] in (
+            VID_FORMATS
+        )  # Check if it's a file
+        self.is_url = self.source.lower().startswith(
+            ("rtsp://", "rtmp://", "http://", "https://")
+        )
+        self.webcam = (
+            self.source.isnumeric()
+            or self.source.endswith(".txt")
+            or (self.is_url and not self.is_file)
+        )
+
         if self.is_url and self.is_file:
-            self.source = check_file(self.source)  # If it's a URL and a file, check the file
+            self.source = check_file(
+                self.source
+            )  # If it's a URL and a file, check the file
 
         # Set up the device (GPU or CPU)
         self.device = select_device(self.device)
@@ -444,12 +701,18 @@ class TrackPedPublisher(Node):
         self.model.warmup(imgsz=(1, 3, *self.imgsz))
 
         # Initialize the tracker (StrongSort in this case)
-        self.tracker_list = [create_tracker(self.tracking_method, None, self.reid_weights, self.device, False)]
+        self.tracker_list = [
+            create_tracker(
+                self.tracking_method, None, self.reid_weights, self.device, False
+            )
+        ]
         self.outputs = [None] * 1  # To hold tracking outputs
         self.prev_frames = [None] * 1  # Previous frames for camera motion compensation
         self.curr_frames = [None] * 1  # Current frames
         self.seen = 0  # Frame counter
-        self.pre_velocities_cal = pd.DataFrame(columns=['ID', 'Real_x_position', 'Depth'])  # Velocity calculation storage
+        self.pre_velocities_cal = pd.DataFrame(
+            columns=["ID", "Real_x_position", "Depth"]
+        )  # Velocity calculation storage
 
         # RealSense configuration for depth and color streams if using webcam
         if self.webcam:
@@ -464,19 +727,24 @@ class TrackPedPublisher(Node):
 
         # Calculate focal length in pixels based on the camera's field of view
         self.display_center = 1280 // 2  # Horizontal center of the image
-        self.f_pixel = (1280 * 0.5) / np.tan(69 * 0.5 * np.pi / 180)  # Horizontal focal length for angle calculation
-
+        self.f_pixel = (1280 * 0.5) / np.tan(
+            69 * 0.5 * np.pi / 180
+        )  # Horizontal focal length for angle calculation
 
         self.known_id = {}
 
         # Milvus or other database-related variables
-        self.client, self.collection_name, self.samples = init_Milvus()  # Initialize Milvus database connection
+        self.client, self.collection_name, self.samples = (
+            init_Milvus()
+        )  # Initialize Milvus database connection
 
         # Set up directories and save paths
-        self.project = ROOT / 'runs' / 'track'
-        self.name = 'exp'
-        self.save_dir = increment_path(Path(self.project) / self.name, exist_ok=False)  # Increment run directory
-        (self.save_dir / 'tracks').mkdir(parents=True, exist_ok=True)
+        self.project = ROOT / "runs" / "track"
+        self.name = "exp"
+        self.save_dir = increment_path(
+            Path(self.project) / self.name, exist_ok=False
+        )  # Increment run directory
+        (self.save_dir / "tracks").mkdir(parents=True, exist_ok=True)
 
     # Timer callback
     def timer_callback(self):
@@ -487,50 +755,89 @@ class TrackPedPublisher(Node):
             color_frame = frames.get_color_frame()
 
             if not depth_frame or not color_frame:
-                return # Return this frame if either depth or color frame is missing
-            
+                return  # Return this frame if either depth or color frame is missing
+
             # Convert frames to NumPy arrays for processing
             depth_image = np.asanyarray(depth_frame.get_data())
             color_image = np.asanyarray(color_frame.get_data())
 
-            im0s = [color_image] # List of images to be processed
-            paths = ['webcam'] # Using webcam
+            im0s = [color_image]  # List of images to be processed
+            paths = ["webcam"]  # Using webcam
 
         else:
             # Use the source as the input path (for files or URLs)
             paths = [self.source]
-            im0s = [cv2.imread(self.source)] # Replace with actual image loading logic for your source type 
+            im0s = [
+                cv2.imread(self.source)
+            ]  # Replace with actual image loading logic for your source type
             if im0s[0] is None:
                 self.get_logger().error(f"Failed to load image from {self.source}")
-                return # Skip processing this frame if the image fails to load
+                return  # Skip processing this frame if the image fails to load
 
-        # Process faces if needed 
+        # Process faces if needed
         faces_data = process_faces(im0s[0])
 
         # Apply object detection
-        p, im = process_detection(dt=None, im0s=im0s, paths=paths, model=self.model,
-                                  device = self.device, imgsz=self.imgsz, save_dir=self.save_dir,
-                                  is_seg=False, conf_thres=self.conf_thres, iou_thres=self.iou_thres,
-                                  max_det=self.max_det, augment=False, visualize=False,
-                                  classes=None, agnostic_nms=False)
-        
+        p, im = process_detection(
+            dt=None,
+            im0s=im0s,
+            paths=paths,
+            model=self.model,
+            device=self.device,
+            imgsz=self.imgsz,
+            save_dir=self.save_dir,
+            is_seg=False,
+            conf_thres=self.conf_thres,
+            iou_thres=self.iou_thres,
+            max_det=self.max_det,
+            augment=False,
+            visualize=False,
+            classes=None,
+            agnostic_nms=False,
+        )
+
         # Call process_tracking to track detected objects
-        rs_dicts, self.pre_velocities_cal = process_tracking(p=p, dt=None, im0s=im0s, paths=paths, curr_frames=self.curr_frames,
-                                                             prev_frames=self.prev_frames, tracker_list=self.tracker_list, outputs=self.outputs,
-                                                             faces_data=faces_data, depth_frame=depth_frame if self.webcam else None, display_center = self.display_center,
-                                                             f_pixel=self.f_pixel, known_id=self.known_id, collection_name=self.collection_name,
-                                                             samples=self.samples, client=self.client, save_crop=False, line_thickness=self.line_thickness,
-                                                             names=self.names, im=im0s[0], DEPTH_WIDTH=1280, DEPTH_HEIGHT=720, save_vid=self.save_vid,
-                                                             show_vid=self.show_vid, hide_labels=self.hide_labels, hide_conf=self.hide_conf,
-                                                             hide_class = self.hide_class, windows=[], seen=self.seen, pre_velocities_cal=self.pre_velocities_cal,
-                                                             DELTA_T=1/30
-                                                             )
-        
+        rs_dicts, self.pre_velocities_cal = process_tracking(
+            p=p,
+            dt=None,
+            im0s=im0s,
+            paths=paths,
+            curr_frames=self.curr_frames,
+            prev_frames=self.prev_frames,
+            tracker_list=self.tracker_list,
+            outputs=self.outputs,
+            faces_data=faces_data,
+            depth_frame=depth_frame if self.webcam else None,
+            display_center=self.display_center,
+            f_pixel=self.f_pixel,
+            known_id=self.known_id,
+            collection_name=self.collection_name,
+            samples=self.samples,
+            client=self.client,
+            save_crop=False,
+            line_thickness=self.line_thickness,
+            names=self.names,
+            im=im0s[0],
+            DEPTH_WIDTH=1280,
+            DEPTH_HEIGHT=720,
+            save_vid=self.save_vid,
+            show_vid=self.show_vid,
+            hide_labels=self.hide_labels,
+            hide_conf=self.hide_conf,
+            hide_class=self.hide_class,
+            windows=[],
+            seen=self.seen,
+            pre_velocities_cal=self.pre_velocities_cal,
+            DELTA_T=1 / 30,
+        )
+
         # Create the TrackedPersons message
         tracked_persons_msg = TrackedPersons()
         tracked_persons_msg.header = Header()
         tracked_persons_msg.header.stamp = self.get_clock().now().to_msg()
-        tracked_persons_msg.header.frame_id = "camera_frame" # Adjust frame to your setup
+        tracked_persons_msg.header.frame_id = (
+            "camera_frame"  # Adjust frame to your setup
+        )
 
         # Populate TrackedPersons message with tracked objects
         tracked_persons_msg.tracks = []
@@ -539,28 +846,33 @@ class TrackPedPublisher(Node):
             tracked_person_msg = TrackedPerson()
 
             # Assign ID and bounding box
-            tracked_person_msg.id = int(rs_dict['id'])
-            tracked_person_msg.bbox_upper_left_x = rs_dict['bbox'][0]
-            tracked_person_msg.bbox_upper_left_y = rs_dict['bbox'][1]
-            tracked_person_msg.bbox_bottom_right_x = rs_dict['bbox'][2]
-            tracked_person_msg.bbox_bottom_right_y = rs_dict['bbox'][3]
+            tracked_person_msg.id = int(rs_dict["id"])
+            tracked_person_msg.bbox_upper_left_x = rs_dict["bbox"][0]
+            tracked_person_msg.bbox_upper_left_y = rs_dict["bbox"][1]
+            tracked_person_msg.bbox_bottom_right_x = rs_dict["bbox"][2]
+            tracked_person_msg.bbox_bottom_right_y = rs_dict["bbox"][3]
 
             # Assign depth and angle
-            tracked_person_msg.depth = rs_dict['depth']
-            tracked_person_msg.angle = rs_dict['angle']
+            tracked_person_msg.depth = rs_dict["depth"]
+            tracked_person_msg.angle = rs_dict["angle"]
 
             # Assign velocity if available
-            if rs_dict['velocity']:
-                tracked_person_msg.twist.linear.x = rs_dict['velocity'][0] # velocity in x direction
-                tracked_person_msg.twist.linear.z = rs_dict['velocity'][1] # velocity in z direction
+            if rs_dict["velocity"]:
+                tracked_person_msg.twist.linear.x = rs_dict["velocity"][
+                    0
+                ]  # velocity in x direction
+                tracked_person_msg.twist.linear.z = rs_dict["velocity"][
+                    1
+                ]  # velocity in z direction
             else:
                 tracked_person_msg.twist.linear.x = 0.0
                 tracked_person_msg.twist.linera.z = 0.0
 
-            
             # Calculate x and z coordinates of the pedestrian in the camera frame
-            real_x = rs_dict['depth'] * np.tan(rs_dict['angle']) # Calculate x using trigonometry
-            real_z = rs_dict['depth'] # z is the depth directly
+            real_x = rs_dict["depth"] * np.tan(
+                rs_dict["angle"]
+            )  # Calculate x using trigonometry
+            real_z = rs_dict["depth"]  # z is the depth directly
 
             # Fill in the pose with real-world coordinates
             tracked_person_msg.pose = Pose()
@@ -573,7 +885,7 @@ class TrackPedPublisher(Node):
             tracked_person_msg.pose.orientation.y = 0.0
             tracked_person_msg.pose.orientation.z = 0.0
             tracked_person_msg.pose.orientation.w = 1.0
-            
+
             # Add individual tracked person to the list
             tracked_persons_msg.tracks.append(tracked_person_msg)
 
