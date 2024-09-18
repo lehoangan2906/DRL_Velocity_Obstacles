@@ -1,0 +1,8 @@
+source;share/drl_vo/hook/cmake_prefix_path.ps1
+source;share/drl_vo/hook/cmake_prefix_path.dsv
+source;share/drl_vo/hook/cmake_prefix_path.sh
+source;share/drl_vo/local_setup.bash
+source;share/drl_vo/local_setup.dsv
+source;share/drl_vo/local_setup.ps1
+source;share/drl_vo/local_setup.sh
+source;share/drl_vo/local_setup.zsh

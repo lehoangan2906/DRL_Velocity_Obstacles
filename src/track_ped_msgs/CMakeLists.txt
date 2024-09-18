@@ -6,17 +6,16 @@ find_package(ament_cmake REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(builtin_interfaces REQUIRED)
+find_package(geometry_msgs REQUIRED)  # Add this line to find geometry_msgs
 
 # Include directories
 include_directories(include)
 
 # Generate messages
-find_package(rosidl_default_generators REQUIRED)
-
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/TrackedPerson.msg"
   "msg/TrackedPersons.msg"
-  DEPENDENCIES std_msgs
+  DEPENDENCIES std_msgs geometry_msgs  # Add geometry_msgs as a dependency
 )
 
 ament_package()
