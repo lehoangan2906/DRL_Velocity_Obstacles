@@ -25,7 +25,7 @@ from time import time
 from pathlib import Path
 from cv_bridge import CvBridge
 from geometry_msgs.msg import Pose, Twist
-from track_utils.insightface.app import FaceAnalysis
+from track_utils.insightface.app.face_analysis import FaceAnalysis
 from track_utils.Tracking_Face.find_distance import *
 from track_utils.insightface.data import get_image as ins_get_image
 from track_utils.Tracking_Face.yolov8_tracking.utils.milvus_tool import *

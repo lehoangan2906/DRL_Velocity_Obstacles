@@ -15,6 +15,7 @@ import random
 import numpy as np
 from gym import spaces
 from rclpy.node import Node
+from rclpy.clock import Clock
 from gym.utils import seeding
 from cnn_msgs.msg import CnnData
 from gazebo_msgs.msg import ModelState
@@ -23,7 +24,7 @@ from track_ped_msgs.msg import TrackedPersons
 from nav_msgs.msg import Odometry, OccupancyGrid
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 from geometry_msgs.msg import PoseWithCovarianceStamped
-from gazebo_msgs.srv import GetModelState, SetModelState
+from gazebo_msgs.srv import GetEntityState, SetEntityState
 from geometry_msgs.msg import Pose, Twist, Point, PoseStamped
 
 
@@ -48,22 +49,18 @@ class DRLNavEnv(Node, gym.Env):
     def __init__(self):
 
         # Initialize the ROS 2 system
-        rclpy.init(args=None)
-
-        # Initialize the ROS2 node called 'drl_nav_env'
-        Node.__init__(self, "drl_nav_env")
+        super().__init__('drl_nav_env')
 
         # Initialize the OpenAI Gym environment
         gym.Env.__init__(self)
 
         # Set a random seed for reproducibility
-        self.seed()
+        if hasattr(self, 'seed'):
+            self.seed()
 
         # Robot parameters:
         self.ROBOT_RADIUS = 0.3  # for collision checking
-        self.GOAL_RADIUS = (
-            0.3  # How close the robot must get to the goal to consider it reached
-        )
+        self.GOAL_RADIUS = (0.3) # How close the robot must get to the goal to consider it reached
         self.DIST_NUM = 10  # Number of distance measurements to track the robot's progress to the goal
         self.pos_valid_flag = True  # Flag to check if the robot's position is valid (used for initialization)
 
@@ -114,12 +111,12 @@ class DRLNavEnv(Node, gym.Env):
 
         # ROS 2 service clients for interacting with Gazebo
         self.gazebo_client = self.create_client(
-            SetModelState,
-            "/gazebo/set_model_state",  # Set the robot's pose in the Gazebo simulation
+            SetEntityState,
+            "/gazebo/set_entity_state",  # Set the robot's pose in the Gazebo simulation
         )
         self.get_model_state = self.create_client(
-            GetModelState,
-            "/gazebo/get_model_state",  # Get the robot's current pose from Gazebo
+            GetEntityState,
+            "/gazebo/get_entity_state",  # Get the robot's current pose from Gazebo
         )
 
         # quality of service settings for subscribers and publishers
@@ -182,9 +179,6 @@ class DRLNavEnv(Node, gym.Env):
             "initialpose",
             qos,  # Publish the robot's initial pose to AMCL for localization
         )
-
-        # Ensure all system (publishers, subscribers, services) are ready
-        self._check_all_systems_ready()
 
 
     # ========================================================================= #
@@ -435,7 +429,7 @@ class DRLNavEnv(Node, gym.Env):
         """
 
         self.get_logger().debug(f"Waiting for '{name}' to be READY...")
-        start_time = self.get_clock().now()
+        start_time = Clock().now().to_msg()
 
         while obj.get_subscription_count() == 0 and rclpy.ok():
             # Log a warning if no subscribers are connected
@@ -447,7 +441,7 @@ class DRLNavEnv(Node, gym.Env):
             rclpy.sleep(1.0)
 
             # Check if the timeout has been exceeded
-            elapsed_time = self.get_clock().now() - start_time
+            elapsed_time = Clock().now().to_msg() - start_time
             if elapsed_time.nanoseconds / 1e9 > timeout:
                 self.get_logger().fatal(
                     f"Publisher '{name}' is not available after waiting for {timeout} seconds."
@@ -463,7 +457,7 @@ class DRLNavEnv(Node, gym.Env):
         """
         self.get_logger().debug(f"Waiting for '{service_name}' to be READY...")
 
-        start_time = self.get_clock().now()
+        start_time = Clock().now().to_msg()
 
         # Try waiting for the service to become available
         try:
@@ -577,33 +571,46 @@ class DRLNavEnv(Node, gym.Env):
         # Gazebo uses quaternions to represent orientation in 3D space
         robot_state.pose.orientation.x = 0  # No roll
         robot_state.pose.orientation.y = 0  # No pitch
-        robot_state.pose.orientation.z = np.sin(
-            theta / 2
-        )  # Yaw converted to quaternion
+        robot_state.pose.orientation.z = np.sin(theta / 2)  # Yaw converted to quaternion
         robot_state.pose.orientation.w = np.cos(theta / 2)  # Quaternion w component
 
         # Set the reference frame for the robot, which is "world" in Gazebo
         robot_state.reference_frame = "world"
 
-        # Attempt to call the Gazebo service to update the model's state
-        # This service request will place the robot at the specified location in the Gazebo world
-        try:
-            # Call the Gazebo client to update the robot's state
-            result = self.gazebo_client.call(robot_state)
-        except rclpy.ServiceException:
-            # If the Gazebo service fails (e.g., Gazebo is not available), handle the exception.
-            pass
+        # Wait for the service to be available
+        if not self.gazebo_client.wait_for_service(timeout_sec=5.0):
+            self.get_logger().error('/gazebo/set_entity_state service is not available')
+            return
+        
+        request = SetEntityState.Request()
+        request.state = robot_state
+
+        # Call the service
+        future = self.gazebo_client.call_async(request)
+        rclpy.spin_until_future_complete(self, future)
+
+        if future.result() is not None:
+            self.get_logger().info('Set the model state successfully')
+        else:
+            self.get_logger().warn("/gazebo/set_entity_state service call failed")
 
     # Function to publish the initial position of the robot (x, y, theta) in the environment --> for localization
     def _pub_initial_position(self, x, y, theta):
+        """
+        Publishing new initial position (x, y, theta) --> for localization
+        :param x: x-position of the robot
+        :param y: y-position of the robot
+        :param theta: theta-position (orientation) of the robot
+        """
+
         # Create a PoseWithCovarianceStamped message to represent the robot's pose with uncertainty (covariance)
         initial_pose = PoseWithCovarianceStamped()
 
-        # Set the frame of reference for this pose to "map", which is commonly used in ROS2 for navigation
+        # Set the frame of reference for this pose to "map"
         initial_pose.header.frame_id = "map"
 
         # Get the current time and add it to the header (important for time synchronization)
-        initial_pose.header.stamp = self.get_clock().now().to_msg()
+        initial_pose.header.stamp = Clock().now().to_msg()
 
         # Set the robot's position (x, y, z coordinates)
         initial_pose.pose.pose.position.x = x
@@ -616,9 +623,7 @@ class DRLNavEnv(Node, gym.Env):
         initial_pose.pose.pose.orientation.y = 0  # No pitch
         # Yaw converted to quaternion (z-axis rotation)
         initial_pose.pose.pose.orientation.z = np.sin(theta / 2)
-        initial_pose.pose.pose.orientation.w = np.cos(
-            theta / 2
-        )  # Quaternion w component
+        initial_pose.pose.pose.orientation.w = np.cos(theta / 2)  # Quaternion w component
 
         # Publish the initial pose message to the ROS topic that handles localization (e,g., for AMCL)
         self._initial_pose_pub.publish(initial_pose)
@@ -629,12 +634,15 @@ class DRLNavEnv(Node, gym.Env):
         The function randomly selects a goal position (x, y, theta) on the map for the robot,
         ensuring that the goal is within a certain distance range from the robot's current position.
         It then publishes this goal to be used by the robot's navigation system.
+
+        Publishing new random goal [x, y, theta] for global planner
+        :return: goal position [x, y, theta]
         """
 
         dis_diff = 21  # Initialize the distance difference between the robot's current position and the randomly generated goal position
 
-        # Ensure that the goal is at least 4.2 meters away from the robot but not more than 7 meters away
-        while dis_diff >= 7 or dis_diff < 4.2:
+        # Ensure that the goal is at least 2 meters away from the robot but not more than 7 meters away
+        while dis_diff >= 7 or dis_diff < 2:
             # if the distance is too short or too long, the loop continues generating new positions
             # Get a random position (x, y, theta) on the map
             x, y, theta = self._get_random_pos_on_map(self.occ_map)
@@ -670,7 +678,7 @@ class DRLNavEnv(Node, gym.Env):
         goal = PoseStamped()
 
         # Set the timestamp for the message to the current time, ensuring synchronization with other nodes
-        goal.header.stamp = self.get_clock().now().to_msg()
+        goal.header.stamp = Clock().now().to_msg()
 
         # Specify that the goal coordinates are relative to the "map" frame, which is the global reference frame.
         goal.header.frame_id = "map"
@@ -684,6 +692,7 @@ class DRLNavEnv(Node, gym.Env):
         # Quaternions are used in 3D space to avoid issues like gimbal lock
         goal.pose.orientation.x = 0  # No rotation around the x-axis
         goal.pose.orientation.y = 0  # No rotation around the y-axis
+        
         # Rotation around the z-axis (yaw)
         goal.pose.orientation.z = np.sin(goal_yaw / 2)
         # Rotation component to complete the quaternion
@@ -708,24 +717,16 @@ class DRLNavEnv(Node, gym.Env):
         """
 
         # Calculate the total width of the map in the global coordinate system
-        map_width = (
-            occ_map.info.width * occ_map.info.resolution
-            + occ_map.info.origin.position.x
-        )
+        map_width = occ_map.info.width * occ_map.info.resolution + occ_map.info.origin.position.x
 
         # Calculate the total height of the map in the global coordinate system
-        map_height = (
-            occ_map.info.height * occ_map.info.resolution
-            + occ_map.info.origin.position.y
-        )
+        map_height = occ_map.info.height * occ_map.info.resolution + occ_map.info.origin.position.y
 
-        # Generate a random x-coordinate within the map's width
+        # Generate a random x, y-coordinates within the map's width
         x = random.uniform(0.0, map_width)
-
-        # Generate a random y-coordinate within the map's height
         y = random.uniform(0.0, map_height)
 
-        # Define a sage radius around the robot, combining the robot's own radius with and additional safety margin
+        # Define a safe radius around the robot, combining the robot's own radius with and additional safety margin
         radius = self.ROBOT_RADIUS + 0.5
 
         # Loop until a valid position is found (i.e., the position is free of obstacles)
@@ -748,41 +749,40 @@ class DRLNavEnv(Node, gym.Env):
         Args:
             x (float): The x-coordinate of the position to check.
             y (float): The y-coordinate of the position to check.
-            radius (float): The radius around the position to check for obstacles.
+            radius (float): The safe radius of the robot to check for obstacles.
             occ_map (OccupancyGrid): The map data, which includes information about obstacles.
 
         Returns:
             bool: True if the position is valid (free of obstacles and within bounds), False otherwise
         """
 
-        # Calculate the number of cells that correspond to the given safety radius
+        # Convert the safe radius into map grid cells
         cell_radius = int(radius / occ_map.info.resolution)
 
         # Convert the global x, y coordinates to map grid indices
         y_index = int((y - occ_map.info.origin.position.y) / occ_map.info.resolution)
         x_index = int((x - occ_map.info.origin.position.x) / occ_map.info.resolution)
 
-        # Loop through the map cells within the square defined by the radius around the position
+        # Check the cells within the safe radius around the robot
         for i in range(x_index - cell_radius, x_index + cell_radius, 1):
             for j in range(y_index - cell_radius, y_index + cell_radius, 1):
                 # Calculate the linear index of the cell in the map's data array
                 index = j * occ_map.info.width + i
 
-                # Check if the index is within the bounds of the map data
+                # Check if the index is out of bounds
                 if index >= len(occ_map.data):
-                    return (
-                        False  # The index is out of bounds, so the position is invalid
-                    )
+                    return False
 
                 try:
                     # Get the value of the cell from the map's data
                     val = occ_map.data[index]
                 except IndexError:
-                    return False  # An IndexError indicates and out-of-bounds access, so the position is invalid
-
-                # Check if the cell is occupied by an obstacle (non-zero value means occupied )
+                    self.get_logger().error(f"IndexError: index: {index}, map_length: {len(map.data)}")
+                    return False # The position is invalid because the index is out of bounds
+                
+                # If any cell is not free (non-zero), the position is invalid
                 if val != 0:
-                    return False  # The cell is occupied, so the position is invalid
+                    return False
 
         # If all cells in the checked area are free and within bounds, the position is valid
         return True
@@ -791,7 +791,6 @@ class DRLNavEnv(Node, gym.Env):
     # Observation and action functions
 
     # Return the observation data as a vector
-
     def _get_observation(self):
         """
         Processes and normalizes sensor data (pedestrian positions, scan data, and goal position)
@@ -804,59 +803,64 @@ class DRLNavEnv(Node, gym.Env):
             np.ndarray: A combined and normalized observation vector.
         """
 
-        # Extract the pedestrian positions from the cnn_data structure
+        # Extract the pedestrian positions, lidar scan, goal position, robot velocity from the cnn_data structure
         self.ped_pos = self.cnn_data.ped_pos_map
-
-        # Extract the lidar scan data from the cnn_data structure
         self.scan = self.cnn_data.scan
-
-        # Extract the goal position from the cnn_data structure
         self.goal = self.cnn_data.goal_cart
+        self.vel = self.cnn_data.vel
 
-        # Normalize the pedestrian position map (ped_pos) to the range [-1, 1]
+        # Pedestrian positions
+        # MaxAbsScaler: Normalize the pedestrian position map to the range [-1, 1]
         v_min = -2
         v_max = 2
         self.ped_pos = np.array(self.ped_pos, dtype=np.float32)
         self.ped_pos = 2 * (self.ped_pos - v_min) / (v_max - v_min) + (-1)
 
-        # Process and normalize the lidar scan data (Oradar MS200)
-        # Handling missing data (NaN or zero values) by interpolation
-        lidar_resolution_deg = 0.8  # Angular resolution of the Oradar MS200 lidar
-        fov = 360
-        # Total number of lidar points (theoretically)
-        num_lidar_points = int(fov / lidar_resolution_deg)
-        num_segments = 18
-        segment_size = num_lidar_points // num_segments  # Number of points per segment
 
-        # Handle missing values (NaNs or zeros) using interpolation
-        lidar_data = np.array(self.scan, dtype=np.float32)
+        # Laser scan data:
+        temp = np.array(scan, dtype=np.float32)   # Convert the flattened list into a numpy array
+        scan_avg = np.zeros((20, 80))             # Initialize the scan_avg array (20 rows x 80 columns)
 
-        # Split the lidar data into 18 segments and compute the minimum and mean values
-        scan_avg = np.zeros((2, num_segments))
-        for n in range(num_segments):
-            segment_data = lidar_data[n * segment_size : (n + 1) * segment_size]
-            # Minimum value in the segment
-            scan_avg[0, n] = np.min(segment_data)
-            scan_avg[1, n] = np.mean(segment_data)  # Mean value in the segment
+        # Apply min and average pooling with window size = 3 to each scan data
+        for n in range(10):
+            scan_tmp = temp[n * 240 : (n + 1) * 240]    # Get 240 points per scan
+            for i in range(80):                         # 240 points / 3 = 80 (for min and avg pooling)
+                scan_avg[2 * n, i] = np.min(scan_tmp[i * 3 : (i + 1) * 3])          # Min pooling
+                scan_avg[2 * n + 1, i] = np.mean(scan_tmp[i * 3 : (i + 1) * 3])     # Average pooling
 
-        # Flatten the scan data for processing
-        scan_avg_flat = scan_avg.flatten()
-        s_min = 0.03  # Minimum lidar range
-        s_max = 12.0  # Maximum lidar range
-        self.scan = 2 * (scan_avg_flat - s_min) / (s_max - s_min) + (
-            -1
-        )  # Normalize to [-1, 1]
+        # Reshape and normalize 
+        scan_avg = scan_avg.reshape(1600)
+        scan_avg_map = np.matlib.repmat(scan_avg, 1, 4)
+        scan = scan_avg_map.reshape(6400)
 
-        # Normalize the goal position to the range [-1, 1] to ensure all input data is on the same scale.
+        # Normalize between -1 and 1
+        s_min = 0
+        s_max = 30
+        scan = 2 * (scan - s_min) / (s_max - s_min) + (-1)
+
+        # Goal positions:
+        # MaxAbsScaler: Normalize the goal position to the range [-1, 1]
         g_min = -2
         g_max = 2
         self.goal = np.array(self.goal, dtype=np.float32)
         self.goal = 2 * (self.goal - g_min) / (g_max - g_min) + (-1)
 
+        # Velocity normalization (currently commented out)
+        '''
+        vx_min = 0
+        vx_max = 0.5
+        wz_min = -2
+        wz_max = 2
+        self.vel = np.array(self.vel, dtype=np.float32)
+        self.vel[0] = 2 * (self.vel[0] - vx_min) / (vx_max - vx_min) + (-1)
+        self.vel[1] = 2 * (self.vel[1] - wz_min) / (wz_max - wz_min) + (-1)
+        '''
+
         # Combine the normalized pedestrian positions, scan data, and goal position into a single observation vector
-        self.observation = np.concatenate(
-            (self.ped_pos, self.scan, self.goal), axis=None
-        )
+        self.observation = np.concatenate((self.ped_pos, self.scan, self.goal), axis=None)
+
+        # Logging
+        self.get_logger().debug(f"Observation ==>: {self.observation}")
 
         # Return the combined observation vector
         return self.observation
@@ -864,26 +868,37 @@ class DRLNavEnv(Node, gym.Env):
     # collect and return key pieces of information about the robot's state
     # including initial pose, current pose, and goal position
     def _post_information(self):
+        """
+        Return:
+        info: {"initial_pose", "goal_position", "current_pose"}
+        """
+
+        # Create a dictionary with initial_pose, goal_position, and current_pose
         self.info = {
             "initial_pose": self.init_pose,
             "goal_position": self.goal_position,
             "current_pose": self.curr_pose,
         }
+
         return self.info
 
     # Translate a given action into velocity commands, then publishing these commands to the robot
     def _take_action(self, action):
         """
-        Converts action values into linear and angular velocity commands and publishes them.
+        Set linear and angular speed for TurtleBot and execute.
 
         Args:
             action (list): A list where action[0] is the linear velocity control input
                         and action[1] is the angular velocity control input.
         """
+
+        # Use ROS2 logging instead of rospy.logdebug
+        self.get_logger().debug(f"TurtleBot2 Base Twist Cmd>>\nLinear: {action[0]}\nangular: {action[1]}")
+
         cmd_vel = Twist()  # Create a Twist message to store the velocity commands
 
-        # Set the new linear velocity range [-0.4, 0.4] m/s
-        vx_min = -0.4
+        # Set the new linear velocity range [-0.0, 0.4] m/s (no backward moving)
+        vx_min = 0.0
         vx_max = 0.4
 
         # Set the new angular velocity range [-0.6, 0.6] rad/s
@@ -897,13 +912,21 @@ class DRLNavEnv(Node, gym.Env):
         cmd_vel.angular.z = (action[1] + 1) * (vz_max - vz_min) / 2 + vz_min
 
         # Publish the velocity command
-        self._cmd_vel_pub.publish(cmd_vel)
+        for _ in range(1):
+            self._cmd_vel_pub.publish(cmd_vel)
+
+            # Sleep to maintain a publishing rate of 20 Hz 
+            rate = self.create_rate(20)
+            rate.sleep()
+
+        # logging
+        self.get_logger().warn(f"cmd_vel: \nLinear: {cmd_vel.linear.x}\n angular: {cmd_vel.angular.z}")
+
 
     # ========================================================================= #
     # Reward computation
 
     # compute goal reaching reward
-
     def _goal_reached_reward(self, r_arrival, r_waypoint):
         """
         Computes the reward based on how close the robot is to the goal.
@@ -915,19 +938,16 @@ class DRLNavEnv(Node, gym.Env):
             r_waypoint (float): Reward for making progress towards the goal.
 
         Returns:
-            float: The computed reward
+            reward based on proximity to the goal
         """
 
         # Calculate the Euclidean distance between the robot's current position and the goal position
         dist_to_goal = np.linalg.norm(
             np.array(
                 [
-                    self.curr_pose.position.x
-                    - self.goal_position.x,  # X-distance to goal
-                    self.curr_pose.position.y
-                    - self.goal_position.y,  # Y-distance to goal
-                    self.curr_pose.position.z
-                    - self.goal_position.z,  # Z-distance to goal
+                    self.curr_pose.position.x - self.goal_position.x,  # X-distance to goal
+                    self.curr_pose.position.y - self.goal_position.y,  # Y-distance to goal
+                    self.curr_pose.position.z - self.goal_position.z,  # Z-distance to goal
                 ]
             )
         )
@@ -940,11 +960,15 @@ class DRLNavEnv(Node, gym.Env):
             # Initialize the array with the current distance
             self.dist_to_goal_reg = np.ones(self.DIST_NUM) * dist_to_goal
 
+        # logging
+        self.get_logger().warn(f"distance_to_goal_reg = {self.dist_to_goal_reg[t_1]}")
+        self.get_logger().warn(f"distance_to_goal = {dist_to_goal}")
+
         # Define the maximum number of iterations allowed for reaching the goal
         max_iteration = 512
 
         # Case 1: Robot reaches the goal (distance to goal is within the specified radius)
-        if dist_to_goal < self.GOAL_RADIUS:
+        if dist_to_goal <= self.GOAL_RADIUS:
             reward = r_arrival  # Assign maximum reward for reaching the goal
 
         # Case 2: Robot fails to reach teh goal within the maximum allowed iterations
@@ -958,6 +982,9 @@ class DRLNavEnv(Node, gym.Env):
 
         # Update the distance reward for the current iteration (used for future comparisons)
         self.dist_to_goal_reg[t_1] = dist_to_goal
+
+        # Log the reward value
+        self.get_logger().warn(f"Goal reached reward: {reward}")
 
         # Return the calculated reward (positive for progress or goal reached, negative for failure)
         return reward
@@ -973,24 +1000,29 @@ class DRLNavEnv(Node, gym.Env):
             r_collision (float): Penalty factor for colliding with an obstacle (i.e. getting too close)
 
         Returns:
-            float: The computed penalty based on proximity to obstacles.
+            negative reward if the robot collides with obstacles.
         """
 
-        # Find the minimum distance from the lidar scan, ignoring zero values (which indicate no reading)
+        # Find the minimum distance from the lidar scan
         min_scan_dist = np.amin(scan[scan != 0])
 
         # Case 1: The robot is very close to an obstacle, potentially colliding (distance less than or equal to its radius)
         if min_scan_dist <= self.ROBOT_RADIUS and min_scan_dist >= 0.03:
-            return r_collision  # Apply a significant penalty for a collision
+            reward = r_collision
 
         # Case 2: The robot is near an obstacle but not colliding (distance within 3 times its radius)
         elif min_scan_dist < 3 * self.ROBOT_RADIUS:
             # Apply a smaller penalty based on proximity
-            return r_scan * (3 * self.ROBOT_RADIUS - min_scan_dist)
+            reward = r_scan * (3 * self.ROBOT_RADIUS - min_scan_dist)
 
         # Case 3: The robot is far enough from obstacles (no penalty)
         else:
-            return 0.0
+            reward = 0.0
+        
+        # logging
+        self.get_logger().warn(f"Obstacle collision reward: {reward}")
+
+        return reward
 
     # Punishment for high angular velocity (fast turns)
     def _angular_velocity_punish(self, w_z, r_rotation, w_thresh):
@@ -1003,11 +1035,19 @@ class DRLNavEnv(Node, gym.Env):
             w_thresh (float): Threshold for penalizing excessive angular velocity.
 
         Returns:
-            float: The computed penalty based on the angular velocity.
+            Negative reward if the robot turns too much
         """
 
-        #  Penalize the robot for excessive angular velocity (fast turns)
-        return abs(w_z) * r_rotation if abs(w_z) > w_thresh else 0.0
+        # Apply punishment if angular velocity exceeds the threshold
+        if abs(w_z) > w_thresh:
+            reward = abs(w_z) * r_rotation
+        else:
+            reward = 0.0
+
+        # logging
+        self.get_logger().warn(f"Angular velocity punish reward: {reward}")
+
+        return reward
 
     # Reward for aligning with the goal
     def _theta_reward(self, goal, peds, v_x, r_angle, angle_thresh):
@@ -1026,11 +1066,10 @@ class DRLNavEnv(Node, gym.Env):
             float: The computed reward based on heading alignment and pedestrian avoidance.
         """
 
-        # Calculate the preferred angle (theta) to the goal in counter clockwise direction (robot's heading relative to the goal position)
-        # Read more about this formula at: https://en.wikipedia.org/wiki/Atan2
+        # Preferred goal theta (angle to the goal in counterclockwise direction)
         theta_pre = np.arctan2(goal[1], goal[0])
-
         d_theta = theta_pre  # Initialize the heading difference as the preferred angle
+
 
         # Case 1: If there are pedestrians in the scene
         if len(peds.tracks) != 0:
@@ -1055,42 +1094,49 @@ class DRLNavEnv(Node, gym.Env):
                     # Calculate the distance to the pedestrian
                     ped_dis = np.linalg.norm([p_x, p_z])
 
-                    # If the pedestrian is within a 4m radius (in lidar range but slightly larger than depth cam range), check for collision potential
-                    if ped_dis <= 4:
+                    # If the pedestrian is within a 3m radius (maximum depth cam range), check for collision potential
+                    if ped_dis <= 3:
                         # Pedestrian's angle relative to the robot
                         ped_theta = np.arctan2(p_z, p_x)
-                        vo_theta = np.arctan2(
-                            3 * self.ROBOT_RADIUS,
-                            np.sqrt(ped_dis**2 - (3 * self.ROBOT_RADIUS) ** 2),
-                        )
+                        vo_theta = np.arctan2(self.ROBOT_RADIUS, np.sqrt(ped_dis**2 - self.ROBOT_RADIUS ** 2),)
 
                         # Calculate the relative angle between the robot and pedestrian to avoid collision
-                        theta_rp = np.arctan2(
-                            v_x * np.sin(theta) - p_vz, v_x * np.cos(theta) - p_vx
-                        )
+                        theta_rp = np.arctan2(v_x * np.sin(theta) - p_vz, v_x * np.cos(theta) - p_vx)
 
                         # If the angle overlaps with the pedestrian's path (collision cone), mark as unsafe
-                        if theta_rp >= (ped_theta - vo_theta) and theta_rp <= (
-                            ped_theta + vo_theta
-                        ):
+                        if ped_theta - vo_theta <= theta_rp <= ped_theta + vo_theta:
                             free = False
                             break
+                
+                # Choosing the safest turning angle (minimizing deviation from the preferred goal angle)
+                if free:
+                    theta_diff = (theta - theta_pre) ** 2
+                    if theta_diff < theta_min:
+                        theta_min = theta_diff
+                        d_theta = theta
 
         # Case 2: If there are no pedestrians, simply align with the goal
         else:
             d_theta = theta_pre
 
         # Calculate the reward based on the angular difference from the goal direction
-        return r_angle * (angle_thresh - abs(d_theta))
+        reward = r_angle * (angle_thresh - abs(d_theta))
+
+        # logging
+        self.get_logger().warn(f"Theta reward: {reward}")
+
+        return reward
 
     # Aggregate reward computation
     def _compute_reward(self):
         """
         Computes the total reward for the robot's action based on various criteria such as:
         - Reaching the goal
-        - Avoiding obstacles
+        - Progressing toward the goal
+        - Avoiding collisions
+        - Proximity to obstacles
         - Minimizing angular velocity (smooth turning)
-        - Keeping a good heading angle toward the goal
+        - Goal alignment
 
         Returns:
             float: The total reward for the current action.
@@ -1106,9 +1152,7 @@ class DRLNavEnv(Node, gym.Env):
         r_scan = -0.2
 
         # Rewards related to the robot's angle and smooth turning
-        r_angle = (
-            0.6  # Reward for maintaining the correct heading angle towards the goal
-        )
+        r_angle = (0.6)  # Reward for goal alignment
         r_rotation = -0.1  # Penalty for excessive rotation (fast turns)
 
         # Thresholds for angular velocity and angle deviation
@@ -1119,22 +1163,21 @@ class DRLNavEnv(Node, gym.Env):
         r_g = self._goal_reached_reward(r_arrival, r_waypoint)
 
         # 2. Compute the penalty for collisions or being too close to obstacles
-        r_c = self._obstacle_collision_punish(
-            self.cnn_data.scan[:450], r_scan, r_collision
-        )
+        r_c = self._obstacle_collision_punish(self.cnn_data.scan[-240:], r_scan, r_collision)
 
         # 3. Compute the penalty for high angular velocity (fast turns)
-        r_w = self._angular_velocity_punish(
-            self.curr_vel.angular.z, r_rotation, w_thresh
-        )
+        r_w = self._angular_velocity_punish(self.curr_vel.angular.z, r_rotation, w_thresh)
 
         # 3. Compute the reward for aligning with the goal.
-        r_t = self._theta_reward(
-            self.goal, self.peds, self.curr_vel.linear.x, r_angle, angle_thresh
-        )
+        r_t = self._theta_reward(self.goal, self.peds, self.curr_vel.linear.x, r_angle, angle_thresh)
 
         # Total reward is a sum of all components.
-        return r_g + r_c + r_t + r_w
+        reward = r_g + r_c + r_t + r_w
+
+        # logging
+        self.get_logger().warn(f"Compute reward done. \nreward = {reward}")
+
+        return reward
 
     # ========================================================================= #
     # Done flag computation
@@ -1144,7 +1187,8 @@ class DRLNavEnv(Node, gym.Env):
         """
         Determines whether the current episode should end based on several conditions:
         - The robot reaches the goal.
-        - The robot collides with obstacles a certain number of times.
+        - The robot collides with obstacles.
+        - The reward function returns a high negative value.
         - The maximum number of iterations is exceeded.
 
         Args:
@@ -1156,48 +1200,44 @@ class DRLNavEnv(Node, gym.Env):
 
         # Increment the number of iterations (i.e., time steps taken in the current episode)
         self.num_iterations += 1
+        self.get_logger().warn(f"\nnum_iterations = {self.num_iterations}")
 
+
+        # 1) Goal reached?
         # Calculate the Euclidean distance between the robot's current position and the goal position.
         dist_to_goal = np.linalg.norm(
             np.array(
                 [
-                    self.curr_pose.position.x
-                    - self.goal_position.x,  # Difference in x-coordinates
-                    self.curr_pose.position.y
-                    - self.goal_position.y,  # Difference in y-coordinates
-                    self.curr_pose.position.z
-                    - self.goal_position.z,  # Difference in z-coordinates
+                    self.curr_pose.position.x - self.goal_position.x,  # Difference in x-coordinates
+                    self.curr_pose.position.y - self.goal_position.y,  # Difference in y-coordinates
+                    self.curr_pose.position.z - self.goal_position.z,  # Difference in z-coordinates
                 ]
             )
         )
 
-        # Condition 1: Check if the robot has reached the goal (within the defined goal radius)
         if dist_to_goal <= self.GOAL_RADIUS:
             # Stop the robot by sending a zero velocity command
             self._cmd_vel_pub.publish(Twist())
             self._episode_done = True  # Mark the episode as done
+            self.get_logger().warn("\n!!!\nTurtlebot reached the goal\n!!!")
             return True  # Return True indicating that the episode is finished
 
-        # Fetch the latest scan data (e.g., from the lidar) to check the proximity of obstacles
-        scan = self.cnn_data.scan[-450:]  # Use the last 450 scan points
 
-        # Handle missing or zero values in the lidar data using interpolation
-        # Convert zero values (which indicate missing data) to NaN
-        scan[scan == 0] = np.nan
+        # 2) Obstacle collision more than 1 times?
+        # Fetch the latest scan data (e.g., from the lidar) to check the proximity of obstacles
+        scan = self.cnn_data.scan[-240:]  # Use the last 240 scan points
 
         # Find the closest obstacle distance
-        min_scan_dist = np.amin(scan)
+        min_scan_dist = np.amin(scan[scan != 0])
 
         # Ensure min_scan_dist falls within the lidar's valid range of [0.03, 12] meters
         min_scan_dist = np.clip(min_scan_dist, 0.03, 12.0)
 
-        # Condition 2: Check if the robot is colliding with an obstacle
         # If the robot is too close to an obstacle (distance <= robot_radius), increment the bump counter
         if min_scan_dist <= self.ROBOT_RADIUS and min_scan_dist >= 0.03:
             self.bump_num += 1  # Increment the bump counter if the robot is too close
 
-        # Condition 3: If the robot has collided with obstacles more than 3 times, end the episode
-        if self.bump_num >= 3:
+        if self.bump_num >= 1:
             # Stop the robot by sending a zero velocity command
             self._cmd_vel_pub.publish(Twist())
             self.bump_num = 0  # Reset the bump counter for the next episode
@@ -1205,25 +1245,50 @@ class DRLNavEnv(Node, gym.Env):
             self._reset = True  # Flag the environment for a reset after the episode end
             return True  # Return True indicating that the episode is finished
 
-        # Condition 4: Check if the robot has exceeded the maximum number of allowed iteration
-        max_iteration = (
-            512  # Set the maximum number of iterations allowed for one episode
-        )
+        # 4) Check if the robot has exceeded the maximum number of allowed iteration
+        max_iteration = (512)   # Maximum number of iterations allowed for reaching the goal
         if self.num_iterations > max_iteration:
             # Stop the robot by sending a zero velocity command
             self._cmd_vel_pub.publish(Twist())
             self._episode_done = True  # Mark the episode as done
             self._reset = True  # Flag the environment for a reset after the episode end
+            self.get_logger().warn(f"Turtlebot exceeded the maximum number of iterations before reaching the goal @ {self.goal_position}")
             return True
 
-        # Condition 5: Check for excessive negative reward (penalizing bad behavior)
+        # 5) Check for excessive negative reward (penalizing bad behavior)
         negative_reward_threshold = -50
         if reward <= negative_reward_threshold:
             # Stop the robot by sending a zero velocity command
             self._cmd_vel_pub.publish(Twist())
             self._episode_done = True
             self._reset = True
+            self.get_logger().warn(f"Turtlebot performed poorly with a negative reward of {reward}, resetting the episode.")
             return True
 
         # If none of the termination conditions are met, the episode continues
         return False  # Return False indicating that the episode is still ongoing
+
+
+def main(args=None):
+    # Initialize ROS 2
+    rclpy.init(args=args)
+
+    # Create the environment object
+    environment = DRLNavEnv()
+
+    # Ensure all system (publishers, subscribers, services) are ready
+    environment._check_all_systems_ready()
+
+    try:
+        # Spin the node so callbacks get processed
+        rclpy.spin(environment)
+    except KeyboardInterrupt:
+        print("Shutting down due to user interruption")
+    finally:
+        # Cleanup and shutdown
+        environment.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()

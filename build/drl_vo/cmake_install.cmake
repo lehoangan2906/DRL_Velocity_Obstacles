@@ -48,8 +48,26 @@ if(CMAKE_INSTALL_COMPONENT STREQUAL "Unspecified" OR NOT CMAKE_INSTALL_COMPONENT
     "/home/anlh/DRL_Velocity_Obstacles/src/drl_vo/src/cnn_data_pub.py"
     "/home/anlh/DRL_Velocity_Obstacles/src/drl_vo/src/drl_vo_inference.py"
     "/home/anlh/DRL_Velocity_Obstacles/src/drl_vo/src/drl_vo_train.py"
+    "/home/anlh/DRL_Velocity_Obstacles/src/drl_vo/src/dynamic_goal_publisher.py"
     "/home/anlh/DRL_Velocity_Obstacles/src/drl_vo/src/track_data_pub.py"
+    "/home/anlh/DRL_Velocity_Obstacles/src/drl_vo/src/track_utils/Tracking_Face/app3.py"
+    "/home/anlh/DRL_Velocity_Obstacles/src/drl_vo/src/track_utils/Tracking_Face/find_distance.py"
+    "/home/anlh/DRL_Velocity_Obstacles/src/drl_vo/src/track_utils/Tracking_Face/get_newdata.py"
+    "/home/anlh/DRL_Velocity_Obstacles/src/drl_vo/src/track_utils/Tracking_Face/test.py"
+    "/home/anlh/DRL_Velocity_Obstacles/src/drl_vo/src/track_utils/Tracking_Face/testvideo.py"
     )
+endif()
+
+if(CMAKE_INSTALL_COMPONENT STREQUAL "Unspecified" OR NOT CMAKE_INSTALL_COMPONENT)
+  file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/lib/drl_vo/track_utils" TYPE DIRECTORY FILES "/home/anlh/DRL_Velocity_Obstacles/src/drl_vo/src/track_utils" USE_SOURCE_PERMISSIONS FILES_MATCHING REGEX "/[^/]*\\.py$")
+endif()
+
+if(CMAKE_INSTALL_COMPONENT STREQUAL "Unspecified" OR NOT CMAKE_INSTALL_COMPONENT)
+  file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/share/drl_vo/track_utils/Tracking_Face/yolov8_tracking" TYPE DIRECTORY FILES "/home/anlh/DRL_Velocity_Obstacles/src/drl_vo/src/track_utils/Tracking_Face/yolov8_tracking")
+endif()
+
+if(CMAKE_INSTALL_COMPONENT STREQUAL "Unspecified" OR NOT CMAKE_INSTALL_COMPONENT)
+  file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/share/drl_vo/track_utils/buffalo_sc" TYPE DIRECTORY FILES "/home/anlh/DRL_Velocity_Obstacles/src/drl_vo/src/track_utils/buffalo_sc")
 endif()
 
 if(CMAKE_INSTALL_COMPONENT STREQUAL "Unspecified" OR NOT CMAKE_INSTALL_COMPONENT)

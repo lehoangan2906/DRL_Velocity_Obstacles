@@ -1,0 +1,6 @@
+{
+  "package_name": "cnn_msgs",
+  "non_idl_tuples": [
+    "/home/anlh/DRL_Velocity_Obstacles/src/cnn_msgs:msg/CnnData.msg"
+  ]
+}

@@ -1,8 +1,43 @@
 #!/usr/bin/python3
 
 # Usage: This script is modified to be compatible with ROS2 and handle Oradar MS200 lidar data.
+# Informations published:
+# - pedestrian position costmap (ped_pos_map):
+#      + Format: float32[] (flattened 2-channel, 80x80 grid).
+#      + Description: Represents a Cartesian velocity map of pedestrians in the robot's FOV.
+#                     This is a 2-channel map (80x80), where one channel holds the pedestrians' position
+#                     The other channel holds the pedestrians' velocity in the x and z directions.
+#
+# - Front-Facing Lidar Scan History (scan):
+#      + Format: float32[] (a list of historical front-facing lidar scans, each 240 points).
+#      + Description: The historical list of lidar scans within the front-facing 192-degree 
+#                     field of view (-96 to 96 degrees), which is stored in self.lidar_history 
+#                     and published as a flattened array.
+#  
+# - Full 360-Degree lidar scan data (scan_all):
+#      + Format: float32[] (450 lidar points for the full 360-degree scan).
+#      + Description: The full 360-degree lidar scan data, which includes all 450 lidar points from
+#                     the scan_all array.
+#
+# - Current Goal Position in Cartesian Coordinates (goal_cart):
+#      + Format: float32[] (size 2).
+#      + Description: The final goal of the robot in polar coordinates (distance and angle from the
+#                     robot to the goal).
+#
+# - Current Velocity of the robot (vel):
+#      + Format: float32[] (size 2).
+#      + Description: The current velocity of the robot, where the first element is linear velocity
+#                     and the second element is angular velocity.
+#
+# - Depth Image Data (depth):
+#      + Format: float32[] (flatttened depth image data).
+#      + Description: The depth data from the Intel RealSense camera, flattened into a 1D array.
+#
+# - Grayscale Image Data (image_gray):
+#      + Format: float32[] (flattened grayscale image data).
+#      + Description: The grayscale image data from the Intel RealSense camera, also flattened
+#                     into a 1D array.
 
-# It processes pedestrian kinematic maps and lidar data, each with size (80 x 80), and publishes the processed data.
 
 import cv2
 import rclpy
@@ -25,7 +60,7 @@ NUM_LIDAR_BEAMS = int(LIDAR_FOV / LIDAR_RESOLUTION)  # 450 scans per frame
 
 # Time steps for collecting historical data
 NUM_TP = 10  # Number of historical lidar scans
-WINDOW_SIZE = 3  # Sliding window size for pooling methods
+# WINDOW_SIZE = 3  # Sliding window size for pooling methods
 NUM_FRONT_FACING_POINTS = (
     240  # Number of front-facing lidar scans (-96 degree to 96 degree FOV)
 )
@@ -35,9 +70,6 @@ FRONT_FACING_PART_1_START = 330  # index corresponding to -96 degrees
 FRONT_FACING_PART_1_END = 449  # end of the lidar array (360 degrees)
 FRONT_FACING_PART_2_START = 0  # start of lidar array (1 degrees)
 FRONT_FACING_PART_2_END = 120  # index corresponding to +96 degrees
-NUM_FRONT_FACING_BEAMS = (
-    (FRONT_FACING_PART_1_END - FRONT_FACING_PART_1_START) + FRONT_FACING_PART_2_END + 1
-)
 
 
 # Number of total pedestrians (including the robot)
@@ -53,7 +85,7 @@ class CnnDataNode(Node):
             (2, 80, 80)
         )  # Cartesian velocity map for pedestrians
         self.scan_front = np.zeros(
-            240
+            NUM_FRONT_FACING_POINTS
         )  # Store processed lidar data for the front-facing 192 degree FOV
         self.scan_all = np.zeros(
             NUM_LIDAR_BEAMS
@@ -92,15 +124,14 @@ class CnnDataNode(Node):
 
         # Timer for controlling data publishing rate
         self.rate = LIDAR_FRAME_RATE  # 10 Hz
-        self.ts_cnt = 0  # Timestamp counter for historical data
         self.timer = self.create_timer(1.0 / self.rate, self.timer_callback)
 
     # Callback to process pedestrian data and generate the pedestrian position map
     def ped_callback(self, trackPed_msg):
         # Get the pedestrian's position
-        self.ped_pos_map_tmp = np.zeros((2, 80, 80))    ## Reset to clear old data
-        
-        if (len(trackPed_msg.tracks) > 0):
+        self.ped_pos_map_tmp = np.zeros((2, 80, 80))  ## Reset to clear old data
+
+        if len(trackPed_msg.tracks) > 0:
             for ped in trackPed_msg.tracks:
                 x = ped.pose.pose.position.x
                 z = ped.pose.pose.position.z
@@ -108,8 +139,8 @@ class CnnDataNode(Node):
                 vz = ped.twist.twist.linear.z
 
                 # 3m x 3m occupancy grid map:
-                if (x >= 0 and x <= 3 and np.abs(z) <= 10):
-                    col = int(np.floor(-(z-10) / 0.25))
+                if x >= 0 and x <= 3 and np.abs(z) <= 10:
+                    col = int(np.floor(-(z - 10) / 0.25))
                     row = int(np.floor(x / 0.25))
 
                     # ensure bins are within valid range
@@ -117,8 +148,8 @@ class CnnDataNode(Node):
                     col = min(col, 79)
 
                     # Update the cartesian velocity map with pedestrian's velocity
-                    self.ped_pos_map_tmp[0, row, col] = vx   # velocity in x - direction
-                    self.ped_pos_map_tmp[1, row, col] = vz   # velocity in z - direction
+                    self.ped_pos_map_tmp[0, row, col] = vx  # velocity in x - direction
+                    self.ped_pos_map_tmp[1, row, col] = vz  # velocity in z - direction
 
     # Function to update the lidar history with new scans
     def update_lidar_history(self, new_scan):
@@ -190,108 +221,66 @@ class CnnDataNode(Node):
         )
 
         # Store the front-facing scan data
-        self.scan_front = front_facing_scan.reshape(1, -1)
+        self.scan_front = front_facing_scan
 
         # Add the new scan to the lidar history
         self.update_lidar_history(self.scan_front)
 
-    def downsample_lidar(self, scan_data):
-        downsampled_min = []
-        downsampled_avg = []
-
-        for i in range(0, scan_data.shape[1], WINDOW_SIZE):
-            window = scan_data[0, i : i + WINDOW_SIZE]
-
-            if len(window) == WINDOW_SIZE:
-                min_val = np.min(window)
-                avg_val = np.mean(window)
-                downsampled_min.append(min_val)
-                downsampled_avg.append(avg_val)
-
-        # Combine minimum and average pooling results
-        downsampled_combined = np.vstack(
-            (downsampled_min, downsampled_avg)
-        )  # shape (2, 80)
-
-        return downsampled_combined
-
-    def process_lidar_batch(self):
-        # Apply downsampling (minimum and average pooling) on the last 10 scans
-        downsampled_lidar_list = [self.downsample_lidar(scan) for scan in self.lidar_history]
-
-        # Convert the list of numpy arrays to a single numpy array
-        downsampled_lidar_array = np.array(downsampled_lidar_list).reshape(-1, 80)
-
-        # Normalize the downsampled data
-        mean_val = np.mean(downsampled_lidar_array)
-        std_val = np.std(downsampled_lidar_array)
-        normalized_lidar = (downsampled_lidar_array - mean_val) / std_val
-
-        # Reshape into 80x80 by stacking the 20x80 array 4 times
-        lidar_map = np.tile(normalized_lidar, (4, 1)).reshape(80, 80)
-
-        # Reshape iself.depth
-        return lidar_map
-    
     # Callback function for goal position in polar coordinate
     def goal_callback(self, goal_msg):
         self.goal_cart[0] = goal_msg.x
         self.goal_cart[1] = goal_msg.y
-        self.goal_final_polar[0] = np.sqrt(goal_msg.x**2 + goal_msg.y**2)   # Distance to goal
-        self.goal_final_polar[1] = np.arctan2(goal_msg.y, goal_msg.x)   # Angle to goal
+        self.goal_final_polar[0] = np.sqrt(
+            goal_msg.x**2 + goal_msg.y**2
+        )  # Distance to goal
+        self.goal_final_polar[1] = np.arctan2(goal_msg.y, goal_msg.x)  # Angle to goal
 
-    
     def vel_callback(self, vel_msg):
-        self.vel[0] = vel_msg.linear.x 
+        self.vel[0] = vel_msg.linear.x
         self.vel[1] = vel_msg.angular.z
-
-    def depth_callback(self, depth_msg):
-        self.depth_image = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding="passthrough")
-
-    def image_callback(self, image_msg):
-        self.image_gray = cv2.cvtColor(self.bridge.imgmsg_to_cv2(image_msg, "bgr8"), cv2.COLOR_BGR2GRAY)
 
     def timer_callback(self):
         # Check if lidar history has the required number of scans (10) and if scan_front is valid
         if len(self.lidar_history) < NUM_TP or self.scan_front is None:
-            self.get_logger().info('Not enough lidar data to publish')
+            self.get_logger().info("Not enough lidar data to publish")
             return  # Skip publishing if required data is missing
 
         # Check if pedestrian data is valid
         if self.ped_pos_map_tmp is None:
-            self.get_logger().info('Pedestrian data missing, skipping publishing')
-            return  # Skip publishing if pedestrian map is missing
+            self.get_logger().info("Pedestrian data is missing, skipping publishing")
+            return  # Skip publishing if pedestrian data is missing
 
-        # Process lidar batch to generate an 80x80 lidar map
-        lidar_map = self.process_lidar_batch() 
-        cnn_data = CnnData()  # Initialize the custom message
-        cnn_data.lidar_map = lidar_map.flatten().tolist()   # flatten to 1D array
+        # Initialize the custom message
+        cnn_data = CnnData()
 
         # Publish the pedestrian position map
-        cnn_data.ped_pos_map = [float(val) for sublist in self.ped_pos_map for subb in sublist for val in subb]
+        cnn_data.ped_pos_map = [
+            float(val)
+            for sublist in self.ped_pos_map_tmp
+            for subb in sublist
+            for val in subb
+        ]
 
-        # Publish the scan data for visualization/debugging purposes
-        cnn_data.scan = self.scan_front.flatten().tolist()  # Front 240 points
-        cnn_data.scan_all = self.scan_all.tolist()  # surrounding 450 points
+        # Publish the historical list of front-facing 240 points lidar scans
+        cnn_data.scan = [float(val) for scan in self.scan_history for val in scan]
+
+        # Publish the full 360 degree scan (450 points)
+        cnn_data.scan_all = self.scan_all.tolist()
 
         # Publish the goal position
-        cnn_data.goal_cart = self.goal_cart.tolist()    # Goal in cartesian coordinates
-        cnn_data.goal_final_polar = self.goal_final_polar.tolist()    # Goal in polar coordinates
+        cnn_data.goal_cart = self.goal_cart.tolist()  # Goal in cartesian coordinates
+        cnn_data.goal_final_polar = (self.goal_final_polar.tolist())  # Goal in polar coordinates
 
         # Publish the robot's velocity
         cnn_data.vel = self.vel.tolist()
 
         # Publish the depth image data
-        if self.depth_image is not None:
-            cnn_data.depth = self.depth_image.flatten().tolist()
-        else:
-            cnn_data.depth = []
-
-        # Publish the grayscale image data
-        if self.image_gray is not None:
-            cnn_data.image_gray = self.image_gray.flatten().tolist()
-        else:
-            cnn_data.image_gray = []
+        cnn_data.depth = (
+            self.depth_image.flatten().tolist() if self.depth_image is not None else []
+        )
+        cnn_data.image_gray = (
+            self.image_gray.flatten().tolist() if self.image_gray is not None else []
+        )
 
         # Publish the CNN data
         self.cnn_data_pub.publish(cnn_data)
@@ -308,6 +297,7 @@ def main(args=None):
     finally:
         node.destroy_node()
         rclpy.shutdown()
+
 
 if __name__ == "__main__":
     main()

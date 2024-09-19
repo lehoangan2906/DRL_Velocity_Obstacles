@@ -1,5 +1,0 @@
-[31mCMake Error at CMakeLists.txt:12 (install):
-  install DIRECTORY given non-directory "src/cmd_vel_pub.py" to install.
-
-[0m
-gmake: *** [Makefile:226: cmake_check_build_system] Error 1
