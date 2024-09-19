@@ -1,6 +1,0 @@
-Invoking command in '/home/anlh/DRL_Velocity_Obstacles/build/track_ped_msgs': /usr/local/bin/cmake /home/anlh/DRL_Velocity_Obstacles/src/track_ped_msgs -DCATKIN_INSTALL_INTO_PREFIX_ROOT=0 -DCMAKE_INSTALL_PREFIX=/home/anlh/DRL_Velocity_Obstacles/install/track_ped_msgs
-Invoked command in '/home/anlh/DRL_Velocity_Obstacles/build/track_ped_msgs' returned '0': /usr/local/bin/cmake /home/anlh/DRL_Velocity_Obstacles/src/track_ped_msgs -DCATKIN_INSTALL_INTO_PREFIX_ROOT=0 -DCMAKE_INSTALL_PREFIX=/home/anlh/DRL_Velocity_Obstacles/install/track_ped_msgs
-Invoking command in '/home/anlh/DRL_Velocity_Obstacles/build/track_ped_msgs': /usr/local/bin/cmake --build /home/anlh/DRL_Velocity_Obstacles/build/track_ped_msgs -- -j16 -l16
-Invoked command in '/home/anlh/DRL_Velocity_Obstacles/build/track_ped_msgs' returned '0': /usr/local/bin/cmake --build /home/anlh/DRL_Velocity_Obstacles/build/track_ped_msgs -- -j16 -l16
-Invoking command in '/home/anlh/DRL_Velocity_Obstacles/build/track_ped_msgs': /usr/local/bin/cmake --install /home/anlh/DRL_Velocity_Obstacles/build/track_ped_msgs
-Invoked command in '/home/anlh/DRL_Velocity_Obstacles/build/track_ped_msgs' returned '0': /usr/local/bin/cmake --install /home/anlh/DRL_Velocity_Obstacles/build/track_ped_msgs

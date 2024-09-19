@@ -1,7 +1,0 @@
-{
-  "package_name": "track_ped_msgs",
-  "non_idl_tuples": [
-    "/home/anlh/DRL_Velocity_Obstacles/src/track_ped_msgs:msg/TrackedPerson.msg",
-    "/home/anlh/DRL_Velocity_Obstacles/src/track_ped_msgs:msg/TrackedPersons.msg"
-  ]
-}
